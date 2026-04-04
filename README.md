@@ -79,6 +79,12 @@ picotool load build/<preset-name>/sufni-suspension-telemetry.uf2 -f
 
 If the Pico is already in BOOTSEL mode, omit the `-f` flag.
 
+## Test utilities
+
+- `test_utils/inspect_sst_data.py`: Parses an SST file and prints chunk summary (types, counts, record counts, sample rates).
+- `test_utils/sst_to_gpx.py`: Extracts GPS chunks from an SST file and generates a GPX track file with Garmin and custom SST extensions.
+
+
 ## License
 
 MIT

@@ -282,8 +282,3 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 ├── uploaded/           Successfully synced files moved here
 └── trash/              Files trashed via TCP server moved here
 ```
-
-## Test utilities
-
-- `test_utils/inspect_sst_data.py`: Parses an SST file and prints chunk summary (types, counts, record counts, sample rates).
-- `test_utils/sst_to_gpx.py`: Extracts GPS chunks from an SST file and generates a GPX track file with Garmin and custom SST extensions.
