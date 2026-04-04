@@ -1,3 +1,17 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.21.1)
 
 if(NOT DEFINED PICO_BOARD)
@@ -229,3 +243,18 @@ else()
 endif()
 
 pico_add_extra_outputs(sufni-suspension-telemetry)
+
+# Create config-independent symlinks in build/ root for IDE integration.
+# Allows .vscode/c_cpp_properties.json to use fixed paths regardless of preset.
+if(NOT CMAKE_BINARY_DIR STREQUAL "${CMAKE_SOURCE_DIR}/build")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E rm -f "${CMAKE_SOURCE_DIR}/build/compile_commands.json")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "${CMAKE_BINARY_DIR}/compile_commands.json"
+        "${CMAKE_SOURCE_DIR}/build/compile_commands.json"
+    )
+    execute_process(COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_SOURCE_DIR}/build/generated")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "${CMAKE_BINARY_DIR}/generated"
+        "${CMAKE_SOURCE_DIR}/build/generated"
+    )
+endif()
