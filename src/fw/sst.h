@@ -13,19 +13,21 @@ enum state {
     SLEEP,
     WAKING,
     REC_START,
+    GPS_WAIT,
     RECORD,
     REC_STOP,
     SYNC_DATA,
     SERVE_TCP,
     MSC,
 };
-#define STATES_COUNT 9
+#define STATES_COUNT 10
 
 #define CHUNK_TYPE_RATES    0x00
 #define CHUNK_TYPE_TRAVEL   0x01
 #define CHUNK_TYPE_MARKER   0x02
 #define CHUNK_TYPE_IMU      0x03
 #define CHUNK_TYPE_IMU_META 0x04
+#define CHUNK_TYPE_GPS      0x05
 
 // Header for the entire SST file
 struct sst_header {
@@ -55,6 +57,23 @@ struct travel_record {
     uint16_t shock_angle;
 };
 
+struct gps_record {
+    uint32_t date;    // UTC date in YYYYMMDD format
+    uint32_t time_ms; // UTC time of day in milliseconds
+
+    double latitude;
+    double longitude;
+    float altitude;
+
+    float speed;
+    float heading;
+
+    uint8_t fix_mode; // 0 = none, 1 = 2D, 2 = 3D
+    uint8_t satellites;
+    float epe_2d;
+    float epe_3d;
+} __attribute__((packed));
+
 // Meta for the IMU records.
 // As IMU records are in raw device values which depend on hardware and/or configured sensitivity,
 // how many units make 1 G/DPS is described in the meta.
@@ -73,9 +92,10 @@ struct imu_record {
     int16_t gx, gy, gz;
 };
 
-enum command { OPEN, DUMP_TRAVEL, DUMP_IMU, FINISH, MARKER };
+enum command { OPEN, DUMP_TRAVEL, DUMP_GPS, DUMP_IMU, FINISH, MARKER };
 
-#define BUFFER_SIZE 2048
+#define BUFFER_SIZE     2048
+#define GPS_BUFFER_SIZE 30
 
 // IMU buffer size scales with number of configured IMUs: 1024/1536/2048
 #if HAS_IMU

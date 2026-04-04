@@ -43,8 +43,43 @@
 
 #include "hardware_config.h"
 
+#if HAS_GPS
+#include "../sensor/gps/gps_sensor.h"
+#include "../sensor/gps/lc76g.h"
+#endif
+
 static volatile enum state state;
 static volatile bool marker_pending = false;
+#if HAS_GPS
+static volatile bool skip_gps_recording = false;    // Skip GPS fix wait, start recording without GPS
+static volatile bool gps_fix_ready = false;         // GPS fix is ready, waiting for user confirmation
+static volatile bool confirm_gps_recording = false; // 2
+static volatile uint8_t gps_last_satellites = 0;
+static volatile float gps_last_epe = 0.0f;
+#endif
+
+#if HAS_GPS
+#if GPS_MODULE == GPS_LC76G
+static void on_gps_fix(const struct gps_telemetry *t);
+struct gps_sensor gps = {
+    .type = GPS_TYPE_LC76G,
+    .protocol = GPS_PROTOCOL_UART,
+    .comm.uart = {GPS_UART_INST, GPS_PIN_TX, GPS_PIN_RX, 115200},
+    .available = false,
+    .on_fix = on_gps_fix,
+    .init = lc76g_init,
+    .configure = lc76g_configure,
+    .process = lc76g_process,
+    .send_command = lc76g_send_command,
+    .hot_start = lc76g_hot_start,
+    .cold_start = lc76g_cold_start,
+    .power_on = lc76g_power_on,
+    .power_off = lc76g_power_off,
+};
+#else
+struct gps_sensor gps = {.available = false};
+#endif
+#endif // HAS_GPS
 
 static uint32_t scb_orig;
 static uint32_t clock0_orig;
@@ -52,6 +87,9 @@ static uint32_t clock1_orig;
 
 static ssd1306_t disp;
 static repeating_timer_t travel_timer;
+#if HAS_GPS
+static repeating_timer_t gps_timer;
+#endif
 #if HAS_IMU
 static repeating_timer_t imu_timer;
 #endif
@@ -287,6 +325,13 @@ struct travel_record travel_databuffer2[BUFFER_SIZE];
 struct travel_record *active_travel_buffer = travel_databuffer1;
 uint16_t travel_count = 0;
 
+#if HAS_GPS
+struct gps_record gps_databuffer1[GPS_BUFFER_SIZE];
+struct gps_record gps_databuffer2[GPS_BUFFER_SIZE];
+struct gps_record *gps_active_buffer = gps_databuffer1;
+uint16_t gps_count = 0;
+#endif
+
 #if HAS_IMU
 struct imu_record imu_databuffer1[IMU_BUFFER_SIZE];
 struct imu_record imu_databuffer2[IMU_BUFFER_SIZE];
@@ -300,6 +345,15 @@ static void dump_active_travel_buffer(uint16_t size) {
     multicore_fifo_push_blocking((uintptr_t)active_travel_buffer);
     active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
 }
+
+#if HAS_GPS
+static void dump_gps_active_buffer(uint16_t size) {
+    multicore_fifo_push_blocking(DUMP_GPS);
+    multicore_fifo_push_blocking(size);
+    multicore_fifo_push_blocking((uintptr_t)gps_active_buffer);
+    gps_active_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
+}
+#endif
 
 #if HAS_IMU
 static void dump_active_imu_buffer(uint16_t size) {
@@ -333,6 +387,49 @@ static bool travel_cb(repeating_timer_t *rt) {
 
     return state == RECORD;
 }
+
+#if HAS_GPS
+static void on_gps_fix(const struct gps_telemetry *t) {
+    gps_last_satellites = t->satellites;
+    gps_last_epe = t->epe_3d;
+
+    if (gps.fix_tracker.ready) {
+        LOG("GPS", "%.6f,%.6f alt=%.1f spd=%.1f sats=%d epe=%.1f\n", t->latitude, t->longitude, t->altitude, t->speed,
+            t->satellites, t->epe_3d);
+
+        if (state == RECORD) {
+            if (gps_count == GPS_BUFFER_SIZE) {
+                dump_gps_active_buffer(GPS_BUFFER_SIZE);
+                gps_count = 0;
+            }
+
+            gps_active_buffer[gps_count].date = t->date;
+            gps_active_buffer[gps_count].time_ms = t->time_ms;
+            gps_active_buffer[gps_count].latitude = t->latitude;
+            gps_active_buffer[gps_count].longitude = t->longitude;
+            gps_active_buffer[gps_count].altitude = t->altitude;
+            gps_active_buffer[gps_count].speed = t->speed;
+            gps_active_buffer[gps_count].heading = t->heading;
+            gps_active_buffer[gps_count].fix_mode = (uint8_t)t->fix_mode;
+            gps_active_buffer[gps_count].satellites = t->satellites;
+            gps_active_buffer[gps_count].epe_2d = t->epe_2d;
+            gps_active_buffer[gps_count].epe_3d = t->epe_3d;
+            gps_count++;
+        }
+    } else {
+        LOG("GPS", "No reliable fix. sats=%d epe=%.1f\n", t->satellites, t->epe_3d);
+    }
+}
+#endif
+
+#if HAS_GPS
+static bool gps_timer_cb(repeating_timer_t *rt) {
+    if (gps.available) {
+        gps.process(&gps);
+    }
+    return state == RECORD || state == GPS_WAIT;
+}
+#endif
 
 #if HAS_IMU
 static bool imu_cb(repeating_timer_t *rt) {
@@ -387,6 +484,53 @@ static bool imu_cb(repeating_timer_t *rt) {
     return state == RECORD;
 }
 #endif // HAS_IMU
+
+static void start_recording_session() {
+    state = RECORD;
+    char msg[16];
+    sprintf(msg, "REC:%s|%s", fork_sensor.available ? "F" : ".", shock_sensor.available ? "S" : ".");
+    display_message(&disp, msg);
+
+    multicore_fifo_push_blocking(OPEN);
+    int index = (int)multicore_fifo_pop_blocking();
+    if (index < 0) {
+        LOG("REC", "Failed to open data file\n");
+        display_message(&disp, "FILE ERR");
+        while (true) { tight_loop_contents(); }
+    }
+    active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
+#if HAS_IMU
+    active_imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
+#endif
+#if HAS_GPS
+    gps_active_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
+#endif
+    LOG("REC", "Recording to file index %d\n", index);
+
+    if (!add_repeating_timer_us(-1000000 / TRAVEL_SAMPLE_RATE, travel_cb, NULL, &travel_timer)) {
+        display_message(&disp, "TEL TMR ERR");
+        while (true) { tight_loop_contents(); }
+    }
+
+#if HAS_IMU
+    bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
+    if (imu_active) {
+        if (!add_repeating_timer_us(-1000000 / IMU_SAMPLE_RATE, imu_cb, NULL, &imu_timer)) {
+            display_message(&disp, "IMU TMR ERR");
+            while (true) { tight_loop_contents(); }
+        }
+    }
+#endif
+
+#if HAS_GPS
+    if (gps.available && !skip_gps_recording) {
+        if (!add_repeating_timer_us(-50000, gps_timer_cb, NULL, &gps_timer)) {
+            display_message(&disp, "GPS TMR ERR");
+            while (true) { tight_loop_contents(); }
+        }
+    }
+#endif
+}
 
 // ----------------------------------------------------------------------------
 // Data storage
@@ -514,6 +658,17 @@ static void write_travel_chunk(uint16_t size, struct travel_record *buffer) {
     f_sync(&recording);
 }
 
+#if HAS_GPS
+static void write_gps_chunk(uint16_t size, struct gps_record *buffer) {
+    struct chunk_header ch;
+    ch.type = CHUNK_TYPE_GPS;
+    ch.length = size * sizeof(struct gps_record);
+    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
+    f_write(&recording, buffer, ch.length, NULL);
+    f_sync(&recording);
+}
+#endif
+
 #if HAS_IMU
 static void write_imu_chunk(uint16_t size, struct imu_record *buffer) {
     struct chunk_header ch;
@@ -533,6 +688,9 @@ static void data_storage_core1() {
     enum command cmd;
     uint16_t size;
     struct travel_record *travel_buffer;
+#if HAS_GPS
+    struct gps_record *gps_buffer;
+#endif
 #if HAS_IMU
     struct imu_record *imu_buffer;
 #endif
@@ -549,6 +707,9 @@ static void data_storage_core1() {
 #if HAS_IMU
                 multicore_fifo_push_blocking((uintptr_t)imu_databuffer2);
 #endif
+#if HAS_GPS
+                multicore_fifo_push_blocking((uintptr_t)gps_databuffer2);
+#endif
                 break;
             case DUMP_TRAVEL:
                 size = (uint16_t)multicore_fifo_pop_blocking();
@@ -556,6 +717,14 @@ static void data_storage_core1() {
                 multicore_fifo_push_blocking((uintptr_t)travel_buffer);
                 write_travel_chunk(size, travel_buffer);
                 break;
+#if HAS_GPS
+            case DUMP_GPS:
+                size = (uint16_t)multicore_fifo_pop_blocking();
+                gps_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                multicore_fifo_push_blocking((uintptr_t)gps_buffer);
+                write_gps_chunk(size, gps_buffer);
+                break;
+#endif
 #if HAS_IMU
             case DUMP_IMU:
                 size = (uint16_t)multicore_fifo_pop_blocking();
@@ -621,6 +790,15 @@ static void on_rec_start() {
     LOG("REC", "Starting recording session\n");
     travel_count = 0;
     active_travel_buffer = travel_databuffer1;
+#if HAS_GPS
+    gps_count = 0;
+    gps_active_buffer = gps_databuffer1;
+    skip_gps_recording = false;
+    gps_fix_ready = false;
+    confirm_gps_recording = false;
+    gps_last_satellites = 0;
+    gps_last_epe = 0.0f;
+#endif
 #if HAS_IMU
     imu_count = 0;
     active_imu_buffer = imu_databuffer1;
@@ -636,48 +814,91 @@ static void on_rec_start() {
         return;
     }
 
-    state = RECORD;
-    char msg[8];
-    sprintf(msg, "REC:%s|%s", fork_sensor.available ? "F" : ".", shock_sensor.available ? "S" : ".");
-    display_message(&disp, msg);
-
-    multicore_fifo_push_blocking(OPEN);
-    int index = (int)multicore_fifo_pop_blocking();
-    if (index < 0) {
-        LOG("REC", "Failed to open data file\n");
-        display_message(&disp, "FILE ERR");
-        while (true) { tight_loop_contents(); }
-    }
-    LOG("REC", "Recording to file index %d\n", index);
-
-    // Initial buffer pointers for Core 1
-    active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
-#if HAS_IMU
-    active_imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
-#endif
-
-    // Start data acquisition timers
-    if (!add_repeating_timer_us(-1000000 / TRAVEL_SAMPLE_RATE, travel_cb, NULL, &travel_timer)) {
-        display_message(&disp, "TEL TMR ERR");
-        while (true) { tight_loop_contents(); }
-    }
-
-#if HAS_IMU
-    bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
-    if (imu_active) {
-        if (!add_repeating_timer_us(-1000000 / IMU_SAMPLE_RATE, imu_cb, NULL, &imu_timer)) {
-            display_message(&disp, "IMU TMR ERR");
+#if HAS_GPS
+    if (gps.available) {
+        LOG("REC", "GPS available, entering GPS wait state\n");
+        if (!gps.fix_tracker.ready) {
+            gps.power_on(&gps);
+        }
+        if (!add_repeating_timer_us(-50000, gps_timer_cb, NULL, &gps_timer)) {
+            display_message(&disp, "GPS TMR ERR");
             while (true) { tight_loop_contents(); }
         }
+        state = GPS_WAIT;
+        return;
     }
 #endif
+
+    start_recording_session();
 }
+
+#if HAS_GPS
+static void on_gps_wait() {
+    static absolute_time_t display_timeout = {0};
+
+    // User pressed left while waiting for fix - skip GPS and record without it
+    if (skip_gps_recording) {
+        LOG("REC", "GPS skipped, starting recording without GPS\n");
+        cancel_repeating_timer(&gps_timer);
+        gps.power_off(&gps);
+        LOG("REC", "GPS powered off\n");
+        start_recording_session();
+        return;
+    }
+
+    // Check if fix just became ready
+    if (gps.fix_tracker.ready && !gps_fix_ready) {
+        LOG("REC", "GPS fix ready, waiting for user confirmation\n");
+        gps_fix_ready = true;
+    }
+
+    // User confirmed GPS fix - start recording with GPS
+    if (gps_fix_ready && confirm_gps_recording) {
+        LOG("REC", "GPS confirmed, starting recording with GPS\n");
+        cancel_repeating_timer(&gps_timer);
+        start_recording_session();
+        return;
+    }
+
+    // Update display
+    if (absolute_time_diff_us(get_absolute_time(), display_timeout) < 0) {
+        display_timeout = make_timeout_time_ms(200);
+
+        ssd1306_clear(&disp);
+
+        if (gps_fix_ready) {
+            // Fix ready, waiting for confirmation
+            ssd1306_draw_string(&disp, 0, 0, 2, "GPS OK");
+            ssd1306_draw_string(&disp, 0, 24, 1, "press to start");
+        } else {
+            // Still waiting for fix
+            ssd1306_draw_string(&disp, 0, 0, 2, "GPS...");
+            char status[20];
+            sprintf(status, "SAT:%d EPE:%.1f", gps_last_satellites, gps_last_epe);
+            ssd1306_draw_string(&disp, 0, 24, 1, status);
+        }
+
+        ssd1306_show(&disp);
+    }
+}
+#endif
 
 static void on_rec_stop() {
     LOG("REC", "Stopping recording\n");
     state = IDLE;
     display_message(&disp, "IDLE");
     cancel_repeating_timer(&travel_timer);
+
+#if HAS_GPS
+    cancel_repeating_timer(&gps_timer);
+    if (gps_count > 0) {
+        dump_gps_active_buffer(gps_count);
+    }
+    if (gps.available && !skip_gps_recording) {
+        gps.power_off(&gps);
+        LOG("REC", "GPS powered off\n");
+    }
+#endif
 
 #if HAS_IMU
     bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
@@ -879,6 +1100,11 @@ static void (*state_handlers[STATES_COUNT])() = {
     on_sleep,     /* SLEEP */
     on_waking,    /* WAKING */
     on_rec_start, /* REC_START */
+#if HAS_GPS
+    on_gps_wait, /* GPS_WAIT */
+#else
+    dummy, /* GPS_WAIT */
+#endif
     dummy,        /* RECORD */
     on_rec_stop,  /* REC_STOP */
     on_sync_data, /* SYNC_DATA */
@@ -897,6 +1123,15 @@ static void on_left_press(void *user_data) {
         case RECORD:
             state = REC_STOP;
             break;
+#if HAS_GPS
+        case GPS_WAIT:
+            if (gps_fix_ready) {
+                confirm_gps_recording = true;
+            } else {
+                skip_gps_recording = true;
+            }
+            break;
+#endif
         default:
             break;
     }
@@ -956,8 +1191,23 @@ int main() {
     adc_init();
     fork_sensor.init(&fork_sensor);
     shock_sensor.init(&shock_sensor);
-#ifndef NDEBUG
+#if !defined(NDEBUG) && GPS_MODULE == GPS_NONE
     stdio_uart_init();
+#endif
+
+    // GPS init
+#if HAS_GPS
+    if (gps_sensor_init(&gps)) {
+        LOG("INIT", "GPS initialized\n");
+        if (!gps_sensor_configure(&gps, 100, true, true, true, true, false)) {
+            LOG("INIT", "GPS configuration failed\n");
+        }
+        sleep_ms(50);
+        gps.power_off(&gps);
+        LOG("INIT", "GPS powered off to save power\n");
+    } else {
+        LOG("INIT", "GPS not found or failed to initialize\n");
+    }
 #endif
 
     // I2C Init
@@ -1078,6 +1328,9 @@ int main() {
 
 #ifndef USB_UART_DEBUG
     }
+#endif
+
+#if HAS_GPS
 #endif
 
     while (true) { state_handlers[state](); }

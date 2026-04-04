@@ -7,11 +7,12 @@
   },
   "configurePresets": [
     {
-      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-release",
-      "displayName": "Pico 2 W (Release): SPI SD, I2C Disp, AS5600/AS5600 Sensors, IMUs(Frame:MPU6050, Fork:LSM6DSO)",
-      "binaryDir": "${sourceDir}/build/pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-release",
+      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-release",
+      "displayName": "Pico 2 W (Release): SPI SD, I2C Disp, AS5600/AS5600 Sensors, IMUs(Frame:MPU6050, Fork:LSM6DSO), GPS:LC76G",
+      "binaryDir": "${sourceDir}/build/pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-release",
       "cacheVariables": {
         "PICO_BOARD": "pico2_w",
+        "GPS_MODULE": "LC76G",
         "IMU_FRAME": "MPU6050",
         "IMU_FRAME_PROTO": "I2C",
         "IMU_FORK": "LSM6DSO",
@@ -26,11 +27,12 @@
       }
     },
     {
-      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-debug",
-      "displayName": "Pico 2 W (Debug): SPI SD, I2C Disp, AS5600/AS5600 Sensors, IMUs(Frame:MPU6050, Fork:LSM6DSO)",
-      "binaryDir": "${sourceDir}/build/pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-debug",
+      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-debug",
+      "displayName": "Pico 2 W (Debug): SPI SD, I2C Disp, AS5600/AS5600 Sensors, IMUs(Frame:MPU6050, Fork:LSM6DSO), GPS:LC76G",
+      "binaryDir": "${sourceDir}/build/pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-debug",
       "cacheVariables": {
         "PICO_BOARD": "pico2_w",
+        "GPS_MODULE": "LC76G",
         "IMU_FRAME": "MPU6050",
         "IMU_FRAME_PROTO": "I2C",
         "IMU_FORK": "LSM6DSO",
@@ -47,12 +49,12 @@
   ],
   "buildPresets": [
     {
-      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-release",
-      "configurePreset": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-release"
+      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-release",
+      "configurePreset": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-release"
     },
     {
-      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-debug",
-      "configurePreset": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-debug"
+      "name": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-debug",
+      "configurePreset": "pico2-spi-i2c-fas5600-sas5600-frmpu6050-folsm6dso-gpslc76g-debug"
     }
   ]
 }

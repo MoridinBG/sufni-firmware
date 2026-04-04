@@ -48,6 +48,11 @@ def generate():
         {"name": "linear", "variables": {"SHOCK_LINEAR": "ON"}, "display_name": "Linear shock (ADC)"}
     ]
 
+    gps_modules = [
+        {"name": "NONE", "display_name": "None"},
+        {"name": "LC76G", "display_name": "LC76G (UART)"}
+    ]
+
     imu_models = [
         {"name": "NONE", "display_name": "None"},
         {"name": "MPU6050", "display_name": "MPU6050"},
@@ -59,17 +64,18 @@ def generate():
         {"name": "SPI", "display_name": "SPI"}
     ]
 
-    # Defaults: spi microsd, i2c display, as5600 fork, as5600 shock, 
-    # mpu6050 frame imu, lsm6dso i2c fork imu, none rear imu.
+    # Defaults: spi microsd, i2c display, as5600 fork, as5600 shock,
+    # mpu6050 frame imu, lsm6dso i2c fork imu, none rear imu, lc76g gps.
 
     board = get_choice("Select Board:", boards, 1) # Default Pico 2
     microsd = get_choice("Select MicroSD connection:", microsd_options, 0) # Default SPI
     display = get_choice("Select Display connection:", display_options, 0) # Default I2C
     fork = get_choice("Select Fork sensor:", fork_options, 0) # Default AS5600
     shock = get_choice("Select Shock sensor:", shock_options, 0) # Default AS5600
-    
+    gps_module = get_choice("GPS Module:", gps_modules, 1) # Default LC76G
+
     print("\n--- IMU Configuration ---")
-    
+
     frame_imu_model = get_choice("Frame IMU Model:", imu_models, 1) # Default MPU6050
     frame_imu_proto = {"name": "I2C"}
     if frame_imu_model['name'] == "LSM6DSO":
@@ -94,6 +100,7 @@ def generate():
     # Construct the cache variables
     cache_variables = {
         "PICO_BOARD": board['variable'],
+        "GPS_MODULE": gps_module['name'],
         "IMU_FRAME": frame_imu_model['name'],
         "IMU_FRAME_PROTO": frame_imu_proto['name'],
         "IMU_FORK": fork_imu_model['name'],
@@ -118,7 +125,7 @@ def generate():
             f"f_{fork['name']}",
             f"s_{shock['name']}"
         ]
-        
+
         if frame_imu_model['name'] != "NONE":
             name_parts.append(f"fr_{frame_imu_model['name'].lower()}")
         if fork_imu_model['name'] != "NONE":
@@ -127,14 +134,17 @@ def generate():
             name_parts.append(f"re_{rear_imu_model['name'].lower()}")
         if all(m['name'] == "NONE" for m in [frame_imu_model, fork_imu_model, rear_imu_model]):
             name_parts.append("no_imu")
-            
+
+        if gps_module['name'] != "NONE":
+            name_parts.append(f"gps_{gps_module['name'].lower()}")
+
         name_parts.append(build_type.lower())
         full_preset_name = "-".join(name_parts).replace("_", "") # Remove internal underscores for cleaner slug
         
         # Construct a readable Display Name
         disp_board = board['display_name']
         disp_hw = f"{microsd['name'].upper()} SD, {display['name'].upper()} Disp, {fork['name'].upper()}/{shock['name'].upper()} Sensors"
-        
+
         imu_parts = []
         if frame_imu_model['name'] != "NONE":
             imu_parts.append(f"Frame:{frame_imu_model['name']}")
@@ -142,10 +152,11 @@ def generate():
             imu_parts.append(f"Fork:{fork_imu_model['name']}")
         if rear_imu_model['name'] != "NONE":
             imu_parts.append(f"Rear:{rear_imu_model['name']}")
-        
+
         disp_imu = f"IMUs({', '.join(imu_parts)})" if imu_parts else "No IMUs"
-        
-        display_name = f"{disp_board} ({build_type}): {disp_hw}, {disp_imu}"
+        disp_gps = f"GPS:{gps_module['name']}" if gps_module['name'] != "NONE" else "No GPS"
+
+        display_name = f"{disp_board} ({build_type}): {disp_hw}, {disp_imu}, {disp_gps}"
         
         vars = cache_variables.copy()
         vars["CMAKE_BUILD_TYPE"] = build_type
