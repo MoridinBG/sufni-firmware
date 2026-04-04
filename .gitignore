@@ -14,9 +14,6 @@ compile_commands.json
 .pico-sdk/
 .picobuild/
 
-# Generated presets (user-specific hardware config)
-CMakePresets.json
-
 # Python
 __pycache__/
 *.pyc
