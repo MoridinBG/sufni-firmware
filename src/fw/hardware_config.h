@@ -45,7 +45,7 @@
 
 #ifdef SPI_MICROSD
 #define MICROSD_SPI      spi0
-#define BAUD_RATE        (25 * 1000 * 1000)
+#define BAUD_RATE        (20 * 1000 * 1000)
 #define MICROSD_PIN_MISO 16
 #define MICROSD_PIN_MOSI 19
 #define MICROSD_PIN_SCK  18
@@ -104,6 +104,7 @@
 #else
 #define GPS_IRQ UART1_IRQ
 #endif
+#define GPS_BAUD_RATE 115200
 #endif
 
 // ----------------------------------------------------------------------------

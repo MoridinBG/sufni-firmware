@@ -4,16 +4,13 @@
 
 #ifndef USB_UART_DEBUG
 #include "bsp/board.h"
-#include "device/usbd.h"
 #endif
 
-#include "cyw43_ll.h"
 #include "ff.h"
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
 #include "hardware/rosc.h"
 #include "hardware/timer.h"
-#include "hardware/watchdog.h"
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
 #include "pico/platform.h"
@@ -21,7 +18,6 @@
 #include "pico/sleep.h"
 #include "pico/time.h"
 #include "pico/types.h"
-#include "pico/unique_id.h"
 
 // For scb_hw so we can enable deep sleep
 #include "hardware/structs/scb.h"
@@ -29,781 +25,60 @@
 #include "../net/tcpserver.h"
 #include "../ntp//ntp.h"
 #include "../rtc//ds3231.h"
-#include "../sensor/imu/imu_sensor.h"
-#ifndef IMU_MODEL_NONE
-#include "../sensor/imu/lsm6dso.h"
-#include "../sensor/imu/mpu6050.h"
-#endif
 #include "../sensor/travel/travel_sensor.h"
+#include "../ui/pushbutton.h"
 #include "../util/config.h"
 #include "../util/list.h"
 #include "../util/log.h"
 #include "calibration_flow.h"
+#include "data_acquisition.h"
+#include "data_storage.h"
+#include "data_sync.h"
+#include "display.h"
+#include "fw_init.h"
+#include "fw_state.h"
+#include "helpers.h"
+#include "sensor_setup.h"
 #include "sst.h"
+#include "state_views.h"
 
 #include "hardware_config.h"
 
+volatile enum state state;
+volatile bool marker_pending = false;
 #if HAS_GPS
-#include "../sensor/gps/gps_sensor.h"
-#include "../sensor/gps/lc76g.h"
+// Left press in GPS_WAIT is phase-dependent: before fix it skips GPS, after fix it confirms recording with GPS.
+volatile bool skip_gps_recording = false;
+static volatile bool gps_fix_ready = false;
+static volatile bool confirm_gps_recording = false;
+volatile uint8_t gps_last_satellites = 0;
+volatile float gps_last_epe = 0.0f;
 #endif
 
-static volatile enum state state;
-static volatile bool marker_pending = false;
-#if HAS_GPS
-static volatile bool skip_gps_recording = false;    // Skip GPS fix wait, start recording without GPS
-static volatile bool gps_fix_ready = false;         // GPS fix is ready, waiting for user confirmation
-static volatile bool confirm_gps_recording = false; // 2
-static volatile uint8_t gps_last_satellites = 0;
-static volatile float gps_last_epe = 0.0f;
-#endif
-
-#if HAS_GPS
-#if GPS_MODULE == GPS_LC76G
-static void on_gps_fix(const struct gps_telemetry *t);
-struct gps_sensor gps = {
-    .type = GPS_TYPE_LC76G,
-    .protocol = GPS_PROTOCOL_UART,
-    .comm.uart = {GPS_UART_INST, GPS_PIN_TX, GPS_PIN_RX, 115200},
-    .available = false,
-    .on_fix = on_gps_fix,
-    .init = lc76g_init,
-    .configure = lc76g_configure,
-    .process = lc76g_process,
-    .send_command = lc76g_send_command,
-    .hot_start = lc76g_hot_start,
-    .cold_start = lc76g_cold_start,
-    .power_on = lc76g_power_on,
-    .power_off = lc76g_power_off,
-};
-#else
-struct gps_sensor gps = {.available = false};
-#endif
-#endif // HAS_GPS
-
-static uint32_t scb_orig;
-static uint32_t clock0_orig;
-static uint32_t clock1_orig;
+static struct fw_power_state power_state;
 
 static ssd1306_t disp;
-static repeating_timer_t travel_timer;
-#if HAS_GPS
-static repeating_timer_t gps_timer;
-#endif
-#if HAS_IMU
-static repeating_timer_t imu_timer;
-#endif
-static FIL recording;
 static struct tcpserver server;
 
 struct ds3231 rtc;
 
-extern struct travel_sensor fork_sensor;
-extern struct travel_sensor shock_sensor;
-
 static struct calibration_ctx cal_ctx;
-
-#if HAS_IMU
-#if IMU_FRAME == IMU_MPU6050
-struct imu_sensor imu_frame = {
-    .type = IMU_TYPE_MPU6050,
-    .protocol = IMU_PROTOCOL_I2C,
-    .comm.i2c = {IMU_FRAME_I2C_INST, IMU_FRAME_ADDRESS, IMU_FRAME_PIN_SDA, IMU_FRAME_PIN_SCL},
-    .available = false,
-    .calibration = IMU_CALIBRATION_DEFAULT,
-    .gyro_temp_coeff = MPU6050_GYRO_TEMP_COEFF,
-    .accel_temp_coeff = MPU6050_ACCEL_TEMP_COEFF,
-    .temp_scale = MPU6050_TEMP_SCALE,
-    .temp_offset = MPU6050_TEMP_OFFSET,
-    .init = mpu6050_init,
-    .check_availability = mpu6050_check_availability,
-    .read_raw = mpu6050_read_raw,
-    .read_temperature = mpu6050_read_temperature,
-    .temperature_celsius = mpu6050_temperature_celsius};
-#elif IMU_FRAME == IMU_LSM6DSO
-struct imu_sensor imu_frame = {
-    .type = IMU_TYPE_LSM6DSO,
-#ifdef IMU_FRAME_SPI
-    .protocol = IMU_PROTOCOL_SPI,
-    .comm.spi = {IMU_FRAME_SPI_INST, IMU_FRAME_PIN_CS, IMU_FRAME_PIN_SCK, IMU_FRAME_PIN_MOSI, IMU_FRAME_PIN_MISO},
-#else
-    .protocol = IMU_PROTOCOL_I2C,
-    .comm.i2c = {IMU_FRAME_I2C_INST, IMU_FRAME_ADDRESS, IMU_FRAME_PIN_SDA, IMU_FRAME_PIN_SCL},
-#endif
-    .available = false,
-    .calibration = IMU_CALIBRATION_DEFAULT,
-    .gyro_temp_coeff = LSM6DSO_GYRO_TEMP_COEFF,
-    .accel_temp_coeff = LSM6DSO_ACCEL_TEMP_COEFF,
-    .temp_scale = LSM6DSO_TEMP_SCALE,
-    .temp_offset = LSM6DSO_TEMP_OFFSET,
-    .init = lsm6dso_init,
-    .check_availability = lsm6dso_check_availability,
-    .read_raw = lsm6dso_read_raw,
-    .read_temperature = lsm6dso_read_temperature,
-    .temperature_celsius = lsm6dso_temperature_celsius};
-#else
-struct imu_sensor imu_frame = {.available = false};
-#endif
-
-#if IMU_FORK == IMU_MPU6050
-struct imu_sensor imu_fork = {.type = IMU_TYPE_MPU6050,
-                              .protocol = IMU_PROTOCOL_I2C,
-                              .comm.i2c = {IMU_FORK_I2C_INST, IMU_FORK_ADDRESS, IMU_FORK_PIN_SDA, IMU_FORK_PIN_SCL},
-                              .available = false,
-                              .calibration = IMU_CALIBRATION_DEFAULT,
-                              .gyro_temp_coeff = MPU6050_GYRO_TEMP_COEFF,
-                              .accel_temp_coeff = MPU6050_ACCEL_TEMP_COEFF,
-                              .temp_scale = MPU6050_TEMP_SCALE,
-                              .temp_offset = MPU6050_TEMP_OFFSET,
-                              .init = mpu6050_init,
-                              .check_availability = mpu6050_check_availability,
-                              .read_raw = mpu6050_read_raw,
-                              .read_temperature = mpu6050_read_temperature,
-                              .temperature_celsius = mpu6050_temperature_celsius};
-#elif IMU_FORK == IMU_LSM6DSO
-struct imu_sensor imu_fork = {
-    .type = IMU_TYPE_LSM6DSO,
-#ifdef IMU_FORK_SPI
-    .protocol = IMU_PROTOCOL_SPI,
-    .comm.spi = {IMU_FORK_SPI_INST, IMU_FORK_PIN_CS, IMU_FORK_PIN_SCK, IMU_FORK_PIN_MOSI, IMU_FORK_PIN_MISO},
-#else
-    .protocol = IMU_PROTOCOL_I2C,
-    .comm.i2c = {IMU_FORK_I2C_INST, IMU_FORK_ADDRESS, IMU_FORK_PIN_SDA, IMU_FORK_PIN_SCL},
-#endif
-    .available = false,
-    .calibration = IMU_CALIBRATION_DEFAULT,
-    .gyro_temp_coeff = LSM6DSO_GYRO_TEMP_COEFF,
-    .accel_temp_coeff = LSM6DSO_ACCEL_TEMP_COEFF,
-    .temp_scale = LSM6DSO_TEMP_SCALE,
-    .temp_offset = LSM6DSO_TEMP_OFFSET,
-    .init = lsm6dso_init,
-    .check_availability = lsm6dso_check_availability,
-    .read_raw = lsm6dso_read_raw,
-    .read_temperature = lsm6dso_read_temperature,
-    .temperature_celsius = lsm6dso_temperature_celsius};
-#else
-struct imu_sensor imu_fork = {.available = false};
-#endif
-
-#if IMU_REAR == IMU_MPU6050
-struct imu_sensor imu_rear = {.type = IMU_TYPE_MPU6050,
-                              .protocol = IMU_PROTOCOL_I2C,
-                              .comm.i2c = {IMU_REAR_I2C_INST, IMU_REAR_ADDRESS, IMU_REAR_PIN_SDA, IMU_REAR_PIN_SCL},
-                              .available = false,
-                              .calibration = IMU_CALIBRATION_DEFAULT,
-                              .gyro_temp_coeff = MPU6050_GYRO_TEMP_COEFF,
-                              .accel_temp_coeff = MPU6050_ACCEL_TEMP_COEFF,
-                              .temp_scale = MPU6050_TEMP_SCALE,
-                              .temp_offset = MPU6050_TEMP_OFFSET,
-                              .init = mpu6050_init,
-                              .check_availability = mpu6050_check_availability,
-                              .read_raw = mpu6050_read_raw,
-                              .read_temperature = mpu6050_read_temperature,
-                              .temperature_celsius = mpu6050_temperature_celsius};
-#elif IMU_REAR == IMU_LSM6DSO
-struct imu_sensor imu_rear = {
-    .type = IMU_TYPE_LSM6DSO,
-#ifdef IMU_REAR_SPI
-    .protocol = IMU_PROTOCOL_SPI,
-    .comm.spi = {IMU_REAR_SPI_INST, IMU_REAR_PIN_CS, IMU_REAR_PIN_SCK, IMU_REAR_PIN_MOSI, IMU_REAR_PIN_MISO},
-#else
-    .protocol = IMU_PROTOCOL_I2C,
-    .comm.i2c = {IMU_REAR_I2C_INST, IMU_REAR_ADDRESS, IMU_REAR_PIN_SDA, IMU_REAR_PIN_SCL},
-#endif
-    .available = false,
-    .calibration = IMU_CALIBRATION_DEFAULT,
-    .gyro_temp_coeff = LSM6DSO_GYRO_TEMP_COEFF,
-    .accel_temp_coeff = LSM6DSO_ACCEL_TEMP_COEFF,
-    .temp_scale = LSM6DSO_TEMP_SCALE,
-    .temp_offset = LSM6DSO_TEMP_OFFSET,
-    .init = lsm6dso_init,
-    .check_availability = lsm6dso_check_availability,
-    .read_raw = lsm6dso_read_raw,
-    .read_temperature = lsm6dso_read_temperature,
-    .temperature_celsius = lsm6dso_temperature_celsius};
-#else
-struct imu_sensor imu_rear = {.available = false};
-#endif
-#endif // HAS_IMU
-
-// ----------------------------------------------------------------------------
-// Helper functions
-
-static void display_message(ssd1306_t *disp, char *message) {
-    ssd1306_clear(disp);
-    ssd1306_draw_string(disp, 0, 10, 2, message);
-    ssd1306_show(disp);
-}
-
-static void soft_reset() {
-    watchdog_enable(1, 1);
-    while (1);
-}
-
-static bool on_battery() {
-    cyw43_thread_enter();
-    bool ret = !cyw43_arch_gpio_get(2);
-    cyw43_thread_exit();
-    return ret;
-}
-
-static float read_voltage() {
-    cyw43_thread_enter();
-    sleep_ms(1);         // NOTE ADC3 readings are way too high without this sleep.
-    adc_gpio_init(29);   // GPIO29 measures VSYS/3
-    adc_select_input(3); // GPIO29 is ADC #3
-    uint32_t vsys = 0;
-    for (int i = 0; i < 3; i++) { vsys += adc_read(); }
-    cyw43_thread_exit();
-    const float conversion_factor = 3.3f / (1 << 12);
-    float ret = vsys * conversion_factor;
-    return ret;
-}
-
-static bool msc_present() {
-#ifdef USB_UART_DEBUG
-    return false;
-#else
-    // Wait for a maximum of 1 second for USB MSC to initialize
-    uint32_t t = time_us_32();
-    while (!tud_ready()) {
-        if (time_us_32() - t > 1000000) {
-            return false;
-        }
-        tud_task();
-    }
-    return true;
-#endif
-}
-
-static bool wifi_connect(bool do_ntp) {
-    LOG("WiFi", "Enabling STA mode\n");
-    cyw43_arch_enable_sta_mode();
-    LOG("WiFi", "Connecting to SSID: %s\n", config.ssid);
-    bool ret = cyw43_arch_wifi_connect_timeout_ms(config.ssid, config.psk, CYW43_AUTH_WPA2_AES_PSK, 20000) == 0;
-    if (ret) {
-        LOG("WiFi", "Connected successfully\n");
-        if (do_ntp) {
-            LOG("WiFi", "Syncing RTC to NTP\n");
-            sync_rtc_to_ntp();
-        }
-    } else {
-        LOG("WiFi", "Connection failed\n");
-    }
-    return ret;
-}
-
-static void wifi_disconnect() {
-    LOG("WiFi", "Disconnecting\n");
-    cyw43_arch_disable_sta_mode();
-    sleep_ms(100);
-}
-
-// ----------------------------------------------------------------------------
-// Data acquisition
-
-static const uint16_t TRAVEL_SAMPLE_RATE = 1000;
-#if HAS_IMU
-static const uint16_t IMU_SAMPLE_RATE = 1000;
-#endif
-
-// We are using two buffers per sensor type. Data acquisition happens on core #1 into the active
-// buffer (referred to by the pointer active_travel_buffer) and we dump to Micro SD card
-// on core #2.
-//
-// When the active buffer is filled on core #1,
-//  - the buffer's pointer is sent to core #2 via the Pico's multicore FIFO
-//  - the other buffer's address is read from the FIFO, and set as active buffer.
-//
-// Core #2 waits until an address is sent from core #1, and
-//  - dumps the content at that address to the card
-//  - sends the buffer address to core #1 via FIFO
-//
-
-struct travel_record travel_databuffer1[BUFFER_SIZE];
-struct travel_record travel_databuffer2[BUFFER_SIZE];
-struct travel_record *active_travel_buffer = travel_databuffer1;
-uint16_t travel_count = 0;
-
-#if HAS_GPS
-struct gps_record gps_databuffer1[GPS_BUFFER_SIZE];
-struct gps_record gps_databuffer2[GPS_BUFFER_SIZE];
-struct gps_record *gps_active_buffer = gps_databuffer1;
-uint16_t gps_count = 0;
-#endif
-
-#if HAS_IMU
-struct imu_record imu_databuffer1[IMU_BUFFER_SIZE];
-struct imu_record imu_databuffer2[IMU_BUFFER_SIZE];
-struct imu_record *active_imu_buffer = imu_databuffer1;
-uint16_t imu_count = 0;
-#endif
-
-static void dump_active_travel_buffer(uint16_t size) {
-    multicore_fifo_push_blocking(DUMP_TRAVEL);
-    multicore_fifo_push_blocking(size);
-    multicore_fifo_push_blocking((uintptr_t)active_travel_buffer);
-    active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
-}
-
-#if HAS_GPS
-static void dump_gps_active_buffer(uint16_t size) {
-    multicore_fifo_push_blocking(DUMP_GPS);
-    multicore_fifo_push_blocking(size);
-    multicore_fifo_push_blocking((uintptr_t)gps_active_buffer);
-    gps_active_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
-}
-#endif
-
-#if HAS_IMU
-static void dump_active_imu_buffer(uint16_t size) {
-    multicore_fifo_push_blocking(DUMP_IMU);
-    multicore_fifo_push_blocking(size);
-    multicore_fifo_push_blocking((uintptr_t)active_imu_buffer);
-    active_imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
-}
-#endif
-
-static bool travel_cb(repeating_timer_t *rt) {
-    if (travel_count == BUFFER_SIZE) {
-        dump_active_travel_buffer(BUFFER_SIZE);
-        travel_count = 0;
-    }
-    active_travel_buffer[travel_count].fork_angle = fork_sensor.measure(&fork_sensor);
-    active_travel_buffer[travel_count].shock_angle = shock_sensor.measure(&shock_sensor);
-    travel_count += 1;
-
-    if (marker_pending) {
-        dump_active_travel_buffer(travel_count);
-        travel_count = 0;
-#if HAS_IMU
-        dump_active_imu_buffer(imu_count);
-        imu_count = 0;
-#endif
-
-        multicore_fifo_push_blocking(MARKER);
-        marker_pending = false;
-    }
-
-    return state == RECORD;
-}
-
-#if HAS_GPS
-static void on_gps_fix(const struct gps_telemetry *t) {
-    gps_last_satellites = t->satellites;
-    gps_last_epe = t->epe_3d;
-
-    if (gps.fix_tracker.ready) {
-        LOG("GPS", "%.6f,%.6f alt=%.1f spd=%.1f sats=%d epe=%.1f\n", t->latitude, t->longitude, t->altitude, t->speed,
-            t->satellites, t->epe_3d);
-
-        if (state == RECORD) {
-            if (gps_count == GPS_BUFFER_SIZE) {
-                dump_gps_active_buffer(GPS_BUFFER_SIZE);
-                gps_count = 0;
-            }
-
-            gps_active_buffer[gps_count].date = t->date;
-            gps_active_buffer[gps_count].time_ms = t->time_ms;
-            gps_active_buffer[gps_count].latitude = t->latitude;
-            gps_active_buffer[gps_count].longitude = t->longitude;
-            gps_active_buffer[gps_count].altitude = t->altitude;
-            gps_active_buffer[gps_count].speed = t->speed;
-            gps_active_buffer[gps_count].heading = t->heading;
-            gps_active_buffer[gps_count].fix_mode = (uint8_t)t->fix_mode;
-            gps_active_buffer[gps_count].satellites = t->satellites;
-            gps_active_buffer[gps_count].epe_2d = t->epe_2d;
-            gps_active_buffer[gps_count].epe_3d = t->epe_3d;
-            gps_count++;
-        }
-    } else {
-        LOG("GPS", "No reliable fix. sats=%d epe=%.1f\n", t->satellites, t->epe_3d);
-    }
-}
-#endif
-
-#if HAS_GPS
-static bool gps_timer_cb(repeating_timer_t *rt) {
-    if (gps.available) {
-        gps.process(&gps);
-    }
-    return state == RECORD || state == GPS_WAIT;
-}
-#endif
-
-#if HAS_IMU
-static bool imu_cb(repeating_timer_t *rt) {
-    uint8_t active_count = 0;
-    if (imu_frame.available)
-        active_count++;
-    if (imu_fork.available)
-        active_count++;
-    if (imu_rear.available)
-        active_count++;
-
-    if (imu_count + active_count > IMU_BUFFER_SIZE) {
-        dump_active_imu_buffer(imu_count);
-        imu_count = 0;
-    }
-
-    // The order of filling the buffer must match the order of imu meta chunks written to file
-    // frame, fork, rear
-    // The records do not identify what sensor they come from
-    int16_t ax, ay, az, gx, gy, gz;
-    if (imu_frame.available) {
-        imu_sensor_read(&imu_frame, &ax, &ay, &az, &gx, &gy, &gz);
-        active_imu_buffer[imu_count].ax = ax;
-        active_imu_buffer[imu_count].ay = ay;
-        active_imu_buffer[imu_count].az = az;
-        active_imu_buffer[imu_count].gx = gx;
-        active_imu_buffer[imu_count].gy = gy;
-        active_imu_buffer[imu_count].gz = gz;
-        imu_count++;
-    }
-    if (imu_fork.available) {
-        imu_sensor_read(&imu_fork, &ax, &ay, &az, &gx, &gy, &gz);
-        active_imu_buffer[imu_count].ax = ax;
-        active_imu_buffer[imu_count].ay = ay;
-        active_imu_buffer[imu_count].az = az;
-        active_imu_buffer[imu_count].gx = gx;
-        active_imu_buffer[imu_count].gy = gy;
-        active_imu_buffer[imu_count].gz = gz;
-        imu_count++;
-    }
-    if (imu_rear.available) {
-        imu_sensor_read(&imu_rear, &ax, &ay, &az, &gx, &gy, &gz);
-        active_imu_buffer[imu_count].ax = ax;
-        active_imu_buffer[imu_count].ay = ay;
-        active_imu_buffer[imu_count].az = az;
-        active_imu_buffer[imu_count].gx = gx;
-        active_imu_buffer[imu_count].gy = gy;
-        active_imu_buffer[imu_count].gz = gz;
-        imu_count++;
-    }
-
-    return state == RECORD;
-}
-#endif // HAS_IMU
-
-static void start_recording_session() {
-    state = RECORD;
-    char msg[16];
-    sprintf(msg, "REC:%s|%s", fork_sensor.available ? "F" : ".", shock_sensor.available ? "S" : ".");
-    display_message(&disp, msg);
-
-    multicore_fifo_push_blocking(OPEN);
-    int index = (int)multicore_fifo_pop_blocking();
-    if (index < 0) {
-        LOG("REC", "Failed to open data file\n");
-        display_message(&disp, "FILE ERR");
-        while (true) { tight_loop_contents(); }
-    }
-    active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
-#if HAS_IMU
-    active_imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
-#endif
-#if HAS_GPS
-    gps_active_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
-#endif
-    LOG("REC", "Recording to file index %d\n", index);
-
-    if (!add_repeating_timer_us(-1000000 / TRAVEL_SAMPLE_RATE, travel_cb, NULL, &travel_timer)) {
-        display_message(&disp, "TEL TMR ERR");
-        while (true) { tight_loop_contents(); }
-    }
-
-#if HAS_IMU
-    bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
-    if (imu_active) {
-        if (!add_repeating_timer_us(-1000000 / IMU_SAMPLE_RATE, imu_cb, NULL, &imu_timer)) {
-            display_message(&disp, "IMU TMR ERR");
-            while (true) { tight_loop_contents(); }
-        }
-    }
-#endif
-
-#if HAS_GPS
-    if (gps.available && !skip_gps_recording) {
-        if (!add_repeating_timer_us(-50000, gps_timer_cb, NULL, &gps_timer)) {
-            display_message(&disp, "GPS TMR ERR");
-            while (true) { tight_loop_contents(); }
-        }
-    }
-#endif
-}
-
-// ----------------------------------------------------------------------------
-// Data storage
-static int setup_storage() {
-    static FATFS fs;
-    FRESULT fr = f_mount(&fs, "", 1);
-    if (fr != FR_OK) {
-        LOG("STORAGE", "Failed to mount filesystem: %d\n", fr);
-        return PICO_ERROR_GENERIC;
-    }
-    LOG("STORAGE", "Filesystem mounted\n");
-
-    char board_id_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
-    pico_get_unique_board_id_string(board_id_str, 2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1);
-    FIL f;
-    uint btw;
-    fr = f_open(&f, "BOARDID", FA_OPEN_ALWAYS | FA_WRITE);
-    if (fr == FR_OK || fr == FR_EXIST) {
-        f_write(&f, board_id_str, 2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES, &btw);
-    }
-    f_close(&f);
-
-    fr = f_mkdir("uploaded");
-    if (!(fr == FR_OK || fr == FR_EXIST)) {
-        return PICO_ERROR_GENERIC;
-    }
-
-    fr = f_mkdir("trash");
-    if (!(fr == FR_OK || fr == FR_EXIST)) {
-        return PICO_ERROR_GENERIC;
-    }
-
-    return 0;
-}
-
-static int open_datafile() {
-    // start from 1, 0 is the special value for the headers in tcpserver
-    uint16_t index = 1;
-    FIL index_fil;
-    FRESULT fr = f_open(&index_fil, "INDEX", FA_OPEN_EXISTING | FA_READ);
-    if (fr == FR_OK || fr == FR_EXIST) {
-        uint br;
-        f_read(&index_fil, &index, 2, &br);
-        if (br == 2) {
-            index = index + 1;
-        }
-    }
-    f_close(&index_fil);
-
-    fr = f_open(&index_fil, "INDEX", FA_OPEN_ALWAYS | FA_WRITE);
-    if (fr == FR_OK) {
-        f_lseek(&index_fil, 0);
-        uint bw;
-        f_write(&index_fil, &index, 2, &bw);
-        f_close(&index_fil);
-    } else {
-        return PICO_ERROR_GENERIC;
-    }
-
-    char filename[10];
-    sprintf(filename, "%05u.SST", index);
-    LOG("STORAGE", "Creating file: %s\n", filename);
-    fr = f_open(&recording, filename, FA_CREATE_NEW | FA_WRITE);
-    if (fr != FR_OK) {
-        return fr;
-    }
-
-    struct sst_header h = {"SST", 4, 0, rtc_timestamp()};
-    f_write(&recording, &h, sizeof(struct sst_header), NULL);
-
-#if HAS_IMU
-    struct chunk_header ch = {CHUNK_TYPE_RATES, 2 * sizeof(struct samplerate_record)};
-#else
-    struct chunk_header ch = {CHUNK_TYPE_RATES, 1 * sizeof(struct samplerate_record)};
-#endif
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    struct samplerate_record re = {CHUNK_TYPE_TRAVEL, TRAVEL_SAMPLE_RATE};
-    f_write(&recording, &re, sizeof(struct samplerate_record), NULL);
-#if HAS_IMU
-    re.type = CHUNK_TYPE_IMU;
-    re.rate = IMU_SAMPLE_RATE;
-    f_write(&recording, &re, sizeof(struct samplerate_record), NULL);
-
-    // Count active IMUs and prepare metadata
-    uint8_t imu_meta_count = 0;
-    if (imu_frame.available)
-        imu_meta_count++;
-    if (imu_fork.available)
-        imu_meta_count++;
-    if (imu_rear.available)
-        imu_meta_count++;
-
-    // IMU meta chunks determine the order of records in IMU record chunks written in the imu_cb
-    // frame, fork, rear
-    if (imu_meta_count > 0) {
-        ch.type = CHUNK_TYPE_IMU_META;
-        ch.length = 1 + imu_meta_count * sizeof(struct imu_meta_record);
-        f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-        f_write(&recording, &imu_meta_count, 1, NULL);
-
-        if (imu_frame.available) {
-            struct imu_meta_record entry = {0, imu_frame.accel_lsb_per_g, imu_frame.gyro_lsb_per_dps};
-            f_write(&recording, &entry, sizeof(struct imu_meta_record), NULL);
-        }
-        if (imu_fork.available) {
-            struct imu_meta_record entry = {1, imu_fork.accel_lsb_per_g, imu_fork.gyro_lsb_per_dps};
-            f_write(&recording, &entry, sizeof(struct imu_meta_record), NULL);
-        }
-        if (imu_rear.available) {
-            struct imu_meta_record entry = {2, imu_rear.accel_lsb_per_g, imu_rear.gyro_lsb_per_dps};
-            f_write(&recording, &entry, sizeof(struct imu_meta_record), NULL);
-        }
-    }
-#endif
-
-    return index;
-}
-
-static void write_travel_chunk(uint16_t size, struct travel_record *buffer) {
-    struct chunk_header ch;
-    ch.type = CHUNK_TYPE_TRAVEL;
-    ch.length = size * sizeof(struct travel_record);
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    f_write(&recording, buffer, ch.length, NULL);
-    f_sync(&recording);
-}
-
-#if HAS_GPS
-static void write_gps_chunk(uint16_t size, struct gps_record *buffer) {
-    struct chunk_header ch;
-    ch.type = CHUNK_TYPE_GPS;
-    ch.length = size * sizeof(struct gps_record);
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    f_write(&recording, buffer, ch.length, NULL);
-    f_sync(&recording);
-}
-#endif
-
-#if HAS_IMU
-static void write_imu_chunk(uint16_t size, struct imu_record *buffer) {
-    struct chunk_header ch;
-    ch.type = CHUNK_TYPE_IMU;
-    ch.length = size * sizeof(struct imu_record);
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    f_write(&recording, buffer, ch.length, NULL);
-    f_sync(&recording);
-}
-#endif
-
-static void data_storage_core1() {
-    int err = setup_storage();
-    multicore_fifo_push_blocking(err);
-
-    int index;
-    enum command cmd;
-    uint16_t size;
-    struct travel_record *travel_buffer;
-#if HAS_GPS
-    struct gps_record *gps_buffer;
-#endif
-#if HAS_IMU
-    struct imu_record *imu_buffer;
-#endif
-    struct chunk_header ch;
-
-    while (true) {
-        cmd = (enum command)multicore_fifo_pop_blocking();
-        switch (cmd) {
-            case OPEN:
-                multicore_fifo_drain();
-                index = open_datafile();
-                multicore_fifo_push_blocking(index);
-                multicore_fifo_push_blocking((uintptr_t)travel_databuffer2);
-#if HAS_IMU
-                multicore_fifo_push_blocking((uintptr_t)imu_databuffer2);
-#endif
-#if HAS_GPS
-                multicore_fifo_push_blocking((uintptr_t)gps_databuffer2);
-#endif
-                break;
-            case DUMP_TRAVEL:
-                size = (uint16_t)multicore_fifo_pop_blocking();
-                travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
-                multicore_fifo_push_blocking((uintptr_t)travel_buffer);
-                write_travel_chunk(size, travel_buffer);
-                break;
-#if HAS_GPS
-            case DUMP_GPS:
-                size = (uint16_t)multicore_fifo_pop_blocking();
-                gps_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
-                multicore_fifo_push_blocking((uintptr_t)gps_buffer);
-                write_gps_chunk(size, gps_buffer);
-                break;
-#endif
-#if HAS_IMU
-            case DUMP_IMU:
-                size = (uint16_t)multicore_fifo_pop_blocking();
-                imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
-                multicore_fifo_push_blocking((uintptr_t)imu_buffer);
-                write_imu_chunk(size, imu_buffer);
-                break;
-#endif
-            case MARKER:
-                ch.type = CHUNK_TYPE_MARKER;
-                ch.length = 0;
-                f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-                f_sync(&recording);
-                break;
-            case FINISH:
-                // Flush travel
-                size = (uint16_t)multicore_fifo_pop_blocking();
-                travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
-                write_travel_chunk(size, travel_buffer);
-#if HAS_IMU
-                // Flush IMU
-                size = (uint16_t)multicore_fifo_pop_blocking();
-                imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
-                write_imu_chunk(size, imu_buffer);
-#endif
-                f_close(&recording);
-                break;
-        }
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Setup functions
-
-static void setup_display(ssd1306_t *disp) {
-#ifdef SPI_DISPLAY
-    spi_init(DISPLAY_SPI, 1000000);
-    gpio_set_function(DISPLAY_PIN_SCK, GPIO_FUNC_SPI);  // SCK
-    gpio_set_function(DISPLAY_PIN_MOSI, GPIO_FUNC_SPI); // MOSI
-
-    disp->external_vcc = false;
-    ssd1306_proto_t p = {
-        DISPLAY_SPI,
-        DISPLAY_PIN_CS,   // CS
-        DISPLAY_PIN_MISO, // DC
-        DISPLAY_PIN_RST   // RST
-    };
-    ssd1306_init(disp, DISPLAY_WIDTH, DISPLAY_HEIGHT, p);
-#else
-    ssd1306_proto_t p = {DISPLAY_ADDRESS, I2C_PIO, I2C_SM, pio_i2c_write_blocking};
-    ssd1306_init(disp, DISPLAY_WIDTH, DISPLAY_HEIGHT, p);
-#endif // SPI_DISPLAY
-
-    ssd1306_flip(disp, DISPLAY_FLIPPED);
-    ssd1306_clear(disp);
-    ssd1306_show(disp);
-}
 
 // ----------------------------------------------------------------------------
 // State handlers
 
+// Enter a new recording session by resetting per-session state, reapplying calibration, and branching into GPS_WAIT or
+// RECORD.
 static void on_rec_start() {
     LOG("REC", "Starting recording session\n");
-    travel_count = 0;
-    active_travel_buffer = travel_databuffer1;
 #if HAS_GPS
-    gps_count = 0;
-    gps_active_buffer = gps_databuffer1;
     skip_gps_recording = false;
     gps_fix_ready = false;
     confirm_gps_recording = false;
     gps_last_satellites = 0;
     gps_last_epe = 0.0f;
 #endif
-#if HAS_IMU
-    imu_count = 0;
-    active_imu_buffer = imu_databuffer1;
-#endif
-    multicore_fifo_drain();
+    recording_reset_buffers();
 
     display_message(&disp, "INIT SENS");
     if (!calibration_apply_to_sensors(&cal_ctx)) {
@@ -820,16 +95,14 @@ static void on_rec_start() {
         if (!gps.fix_tracker.ready) {
             gps.power_on(&gps);
         }
-        if (!add_repeating_timer_us(-50000, gps_timer_cb, NULL, &gps_timer)) {
-            display_message(&disp, "GPS TMR ERR");
-            while (true) { tight_loop_contents(); }
-        }
         state = GPS_WAIT;
+        recording_start_gps_timer(&disp);
         return;
     }
 #endif
 
-    start_recording_session();
+    state = RECORD;
+    recording_start(&disp);
 }
 
 #if HAS_GPS
@@ -839,10 +112,11 @@ static void on_gps_wait() {
     // User pressed left while waiting for fix - skip GPS and record without it
     if (skip_gps_recording) {
         LOG("REC", "GPS skipped, starting recording without GPS\n");
-        cancel_repeating_timer(&gps_timer);
+        recording_stop_gps_timer();
         gps.power_off(&gps);
         LOG("REC", "GPS powered off\n");
-        start_recording_session();
+        state = RECORD;
+        recording_start(&disp);
         return;
     }
 
@@ -855,30 +129,16 @@ static void on_gps_wait() {
     // User confirmed GPS fix - start recording with GPS
     if (gps_fix_ready && confirm_gps_recording) {
         LOG("REC", "GPS confirmed, starting recording with GPS\n");
-        cancel_repeating_timer(&gps_timer);
-        start_recording_session();
+        recording_stop_gps_timer();
+        state = RECORD;
+        recording_start(&disp);
         return;
     }
 
     // Update display
     if (absolute_time_diff_us(get_absolute_time(), display_timeout) < 0) {
         display_timeout = make_timeout_time_ms(200);
-
-        ssd1306_clear(&disp);
-
-        if (gps_fix_ready) {
-            // Fix ready, waiting for confirmation
-            ssd1306_draw_string(&disp, 0, 0, 2, "GPS OK");
-            ssd1306_draw_string(&disp, 0, 24, 1, "press to start");
-        } else {
-            // Still waiting for fix
-            ssd1306_draw_string(&disp, 0, 0, 2, "GPS...");
-            char status[20];
-            sprintf(status, "SAT:%d EPE:%.1f", gps_last_satellites, gps_last_epe);
-            ssd1306_draw_string(&disp, 0, 24, 1, status);
-        }
-
-        ssd1306_show(&disp);
+        display_gps_wait_view(&disp, gps_fix_ready, gps_last_satellites, gps_last_epe);
     }
 }
 #endif
@@ -887,100 +147,11 @@ static void on_rec_stop() {
     LOG("REC", "Stopping recording\n");
     state = IDLE;
     display_message(&disp, "IDLE");
-    cancel_repeating_timer(&travel_timer);
-
-#if HAS_GPS
-    cancel_repeating_timer(&gps_timer);
-    if (gps_count > 0) {
-        dump_gps_active_buffer(gps_count);
-    }
-    if (gps.available && !skip_gps_recording) {
-        gps.power_off(&gps);
-        LOG("REC", "GPS powered off\n");
-    }
-#endif
-
-#if HAS_IMU
-    bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
-    if (imu_active) {
-        cancel_repeating_timer(&imu_timer);
-    }
-#endif
-
-    multicore_fifo_push_blocking(FINISH);
-    // Flush travel
-    multicore_fifo_push_blocking(travel_count);
-    multicore_fifo_push_blocking((uintptr_t)active_travel_buffer);
-#if HAS_IMU
-    // Flush IMU
-    multicore_fifo_push_blocking(imu_count);
-    multicore_fifo_push_blocking((uintptr_t)active_imu_buffer);
-#endif
+    recording_stop();
 }
 
 static void on_sync_data() {
-    LOG("SYNC", "Starting data sync\n");
-    display_message(&disp, "CONNECT");
-    if (!wifi_connect(true)) {
-        LOG("SYNC", "Could not connect wifi\n");
-        display_message(&disp, "CONN ERR");
-        sleep_ms(1000);
-    } else {
-        display_message(&disp, "DAT SYNC");
-        FRESULT fr;
-        DIR dj;
-        FILINFO fno;
-        uint all = 0;
-
-        // get a list of all .SST files in the root directory
-        struct list *to_import = list_create();
-        fr = f_findfirst(&dj, &fno, "", "?????.SST");
-        while (fr == FR_OK && fno.fname[0]) {
-            ++all;
-            list_push(to_import, fno.fname);
-            fr = f_findnext(&dj, &fno);
-        }
-        f_closedir(&dj);
-        LOG("SYNC", "Found %u files to sync\n", all);
-
-        // send all files on the list via TCP, and move them
-        // to the "uploaded" directory
-        uint err = 0;
-        uint curr = 0;
-        struct node *n = to_import->head;
-        TCHAR path_new[19];
-        TCHAR status[10];
-        TCHAR failed[12];
-
-        while (n != NULL) {
-            ++curr;
-            LOG("SYNC", "Sending file: %s (%u/%u)\n", (char *)n->data, curr, all);
-            if (send_file(n->data)) {
-                LOG("SYNC", "File sent successfully\n");
-                sprintf(path_new, "uploaded/%s", n->data);
-                f_rename(n->data, path_new);
-            } else {
-                LOG("SYNC", "File send failed\n");
-                ++err;
-            }
-            sprintf(status, "%u / %u", curr, all);
-            sprintf(failed, "failed: %u", err);
-            ssd1306_clear(&disp);
-            ssd1306_draw_string(&disp, 0, 0, 2, status);
-            ssd1306_draw_string(&disp, 0, 24, 1, failed);
-            ssd1306_show(&disp);
-
-            // wait a bit to avoid weird TCP errors...
-            sleep_ms(100);
-            n = n->next;
-        }
-        list_delete(to_import);
-        LOG("SYNC", "Sync complete: %u succeeded, %u failed\n", all - err, err);
-
-        // leave results on the display for a bit
-        sleep_ms(3000);
-    }
-    wifi_disconnect();
+    sync_recorded_data(&disp);
     state = IDLE;
 }
 
@@ -997,39 +168,27 @@ static void on_idle() {
         timeout = make_timeout_time_ms(500);
 
         uint8_t voltage_percentage = ((read_voltage() - BATTERY_MIN_V) / BATTERY_RANGE) * 100;
-        static char battery_str[] = " PWR";
-        if (battery) {
-            if (voltage_percentage > 99) {
-                snprintf(battery_str, sizeof(battery_str), "FULL");
-            } else {
-                snprintf(battery_str, sizeof(battery_str), "% 3d%%", voltage_percentage);
-            }
-        }
-
-        static char time_str[] = "00:00";
         static struct tm tz_tm;
         time_t t = rtc_timestamp();
         localtime_r(&t, &tz_tm);
-        snprintf(time_str, sizeof(time_str), "%02d:%02d", tz_tm.tm_hour, tz_tm.tm_min);
 
-        ssd1306_clear(&disp);
-        ssd1306_draw_string(&disp, 96, 0, 1, battery_str);
-        ssd1306_draw_string(&disp, 0, 0, 2, time_str);
-        if (fork_sensor.check_availability(&fork_sensor)) {
-            ssd1306_draw_string(&disp, 0, 24, 1, "fork");
-        }
-        if (shock_sensor.check_availability(&shock_sensor)) {
-            ssd1306_draw_string(&disp, 30, 24, 1, "shock");
-        }
+        struct idle_view_model view_model = {
+            .battery_power = battery,
+            .voltage_percentage = voltage_percentage,
+            .hour = (uint8_t)tz_tm.tm_hour,
+            .minute = (uint8_t)tz_tm.tm_min,
+            .fork_available = fork_sensor.check_availability(&fork_sensor),
+            .shock_available = shock_sensor.check_availability(&shock_sensor),
 #if HAS_IMU
-        if (imu_sensor_available(&imu_frame)) {
-            ssd1306_draw_string(&disp, 63, 24, 1, "iFra");
-        }
-        if (imu_sensor_available(&imu_fork)) {
-            ssd1306_draw_string(&disp, 90, 24, 1, "iFor");
-        }
+            .imu_frame_available = imu_sensor_available(&imu_frame),
+            .imu_fork_available = imu_sensor_available(&imu_fork),
+#else
+            .imu_frame_available = false,
+            .imu_fork_available = false,
 #endif
-        ssd1306_show(&disp);
+        };
+
+        display_idle_view(&disp, &view_model);
     }
 }
 
@@ -1045,9 +204,9 @@ static void on_sleep() {
     display_message(&disp, "SLEEP..");
 
 #if PICO_RP2040
-    scb_hw->scr = scb_orig | M0PLUS_SCR_SLEEPDEEP_BITS;
+    scb_hw->scr = power_state.scb_orig | M0PLUS_SCR_SLEEPDEEP_BITS;
 #else
-    scb_hw->scr = scb_orig | M33_SCR_SLEEPDEEP_BITS;
+    scb_hw->scr = power_state.scb_orig | M33_SCR_SLEEPDEEP_BITS;
 #endif
     display_message(&disp, "SLEEP...");
 
@@ -1062,9 +221,9 @@ static void on_waking() {
     LOG("POWER", "Waking from sleep\n");
     rosc_write(&rosc_hw->ctrl, ROSC_CTRL_ENABLE_BITS);
 
-    scb_hw->scr = scb_orig;
-    clocks_hw->sleep_en0 = clock0_orig;
-    clocks_hw->sleep_en1 = clock1_orig;
+    scb_hw->scr = power_state.scb_orig;
+    clocks_hw->sleep_en0 = power_state.clock0_orig;
+    clocks_hw->sleep_en1 = power_state.clock1_orig;
     runtime_init_clocks();
 
     ssd1306_poweron(&disp);
@@ -1080,7 +239,11 @@ static void on_msc() {
     tud_task();
 }
 
-static void dummy() { tight_loop_contents(); }
+// GPS_WAIT is unreachable when GPS support is compiled out, but its enum slot still exists in the handler table.
+static void on_disabled_gps() { tight_loop_contents(); }
+
+// RECORD work runs from acquisition timers after recording_start, so the main loop only idles here.
+static void on_rec() { tight_loop_contents(); }
 
 static void on_serve_tcp() {
     display_message(&disp, "CONNECT");
@@ -1103,9 +266,9 @@ static void (*state_handlers[STATES_COUNT])() = {
 #if HAS_GPS
     on_gps_wait, /* GPS_WAIT */
 #else
-    dummy, /* GPS_WAIT */
+    on_disabled_gps, /* GPS_WAIT */
 #endif
-    dummy,        /* RECORD */
+    on_rec,       /* RECORD */
     on_rec_stop,  /* REC_STOP */
     on_sync_data, /* SYNC_DATA */
     on_serve_tcp, /* SERVE_TCP */
@@ -1179,159 +342,14 @@ static void on_right_longpress(void *user_data) {
 // Entry point
 
 int main() {
-#ifndef USB_UART_DEBUG
-    board_init();
-    tusb_init();
-#else
-    stdio_usb_init();
-    sleep_ms(3000); // Give time for the tty to get enumerated on the host
-#endif
+    const struct fw_button_handlers button_handlers = {
+        .on_left_press = on_left_press,
+        .on_left_longpress = on_left_longpress,
+        .on_right_press = on_right_press,
+        .on_right_longpress = on_right_longpress,
+    };
 
-    // Suspension sensors init
-    adc_init();
-    fork_sensor.init(&fork_sensor);
-    shock_sensor.init(&shock_sensor);
-#if !defined(NDEBUG) && GPS_MODULE == GPS_NONE
-    stdio_uart_init();
-#endif
-
-    // GPS init
-#if HAS_GPS
-    if (gps_sensor_init(&gps)) {
-        LOG("INIT", "GPS initialized\n");
-        if (!gps_sensor_configure(&gps, 100, true, true, true, true, false)) {
-            LOG("INIT", "GPS configuration failed\n");
-        }
-        sleep_ms(50);
-        gps.power_off(&gps);
-        LOG("INIT", "GPS powered off to save power\n");
-    } else {
-        LOG("INIT", "GPS not found or failed to initialize\n");
-    }
-#endif
-
-    // I2C Init
-    uint offset = pio_add_program(I2C_PIO, &i2c_program);
-    i2c_program_init(I2C_PIO, I2C_SM, offset, PIO_PIN_SDA, PIO_PIN_SDA + 1);
-
-#if HAS_IMU
-    // IMU init
-#if IMU_FRAME != IMU_NONE
-    if (!imu_sensor_init(&imu_frame)) {
-        LOG("INIT", "Frame IMU not found or failed to initialize\n");
-    }
-#endif
-#if IMU_FORK != IMU_NONE
-    if (!imu_sensor_init(&imu_fork)) {
-        LOG("INIT", "Fork IMU not found or failed to initialize\n");
-    }
-#endif
-#if IMU_REAR != IMU_NONE
-    if (!imu_sensor_init(&imu_rear)) {
-        LOG("INIT", "Rear IMU not found or failed to initialize\n");
-    }
-#endif
-#endif // HAS_IMU
-
-    // DS3231 init
-    struct tm tm_now;
-    LOG("DS3231", "Initializing RTC\n");
-    ds3231_init(&rtc, I2C_PIO, I2C_SM, pio_i2c_write_blocking, pio_i2c_read_blocking);
-    sleep_ms(1); // without this, garbage values are read from the RTC
-    LOG("DS3231", "Reading datetime\n");
-    ds3231_get_datetime(&rtc, &tm_now);
-    LOG("DS3231", "Time: %04d-%02d-%02d %02d:%02d:%02d\n", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
-        tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
-
-    // Set board time
-#if PICO_RP2040
-    // RP2040: use calendar methods (native to RTC hardware)
-    if (!aon_timer_start_calendar(&tm_now)) {
-        setup_display(&disp);
-        display_message(&disp, "AON ERR");
-        while (true) { tight_loop_contents(); }
-    }
-#else
-    // RP2350: use linear time methods (native to Powman Timer)
-    // Convert UTC struct tm to timespec
-    setenv("TZ", "UTC0", 1);
-    tzset();
-    time_t epoch = mktime(&tm_now);
-    struct timespec ts = {.tv_sec = epoch, .tv_nsec = 0};
-    if (!aon_timer_start(&ts)) {
-        setup_display(&disp);
-        display_message(&disp, "AON ERR");
-        while (true) { tight_loop_contents(); }
-    }
-#endif
-
-    setup_display(&disp);
-
-#ifndef USB_UART_DEBUG
-    if (msc_present()) {
-        LOG("INIT", "Entering MSC mode\n");
-        state = MSC;
-        display_message(&disp, "MSC MODE");
-    } else {
-#endif
-
-        // Storage init
-        display_message(&disp, "INIT STOR");
-        multicore_launch_core1(&data_storage_core1);
-        int err = (int)multicore_fifo_pop_blocking();
-        if (err < 0) {
-            display_message(&disp, "CARD ERR");
-            while (true) { tight_loop_contents(); }
-        }
-        LOG("INIT", "Storage initialized\n");
-
-        if (!load_config()) {
-            display_message(&disp, "CONF ERR");
-            while (true) { tight_loop_contents(); }
-        }
-        LOG("INIT", "Config loaded\n");
-
-        setup_ntp(config.ntp_server);
-        cyw43_arch_init_with_country(config.country);
-        setenv("TZ", config.timezone, 1);
-        tzset();
-        LOG("INIT", "WiFi initialized, country=%d, timezone=%s\n", config.country, config.timezone);
-
-        scb_orig = scb_hw->scr;
-        clock0_orig = clocks_hw->sleep_en0;
-        clock1_orig = clocks_hw->sleep_en1;
-
-        // Initialize calibration context
-        cal_ctx = (struct calibration_ctx){
-            .fork = &fork_sensor,
-            .shock = &shock_sensor,
-#if HAS_IMU
-            .imu_frame = &imu_frame,
-            .imu_fork = &imu_fork,
-            .imu_rear = &imu_rear,
-#endif
-            .disp = &disp,
-        };
-
-        if (calibration_check_needed(&cal_ctx)) {
-            if (!calibration_run(&cal_ctx)) {
-                while (true) { tight_loop_contents(); }
-            }
-        }
-
-        calibration_apply_to_sensors(&cal_ctx);
-
-        state = IDLE;
-
-        create_button(BUTTON_LEFT, NULL, on_left_press, on_left_longpress);
-        create_button(BUTTON_RIGHT, NULL, on_right_press, on_right_longpress);
-
-#ifndef USB_UART_DEBUG
-    }
-#endif
-
-#if HAS_GPS
-#endif
+    state = fw_init(&disp, &rtc, &cal_ctx, &power_state, &button_handlers);
 
     while (true) { state_handlers[state](); }
 

@@ -8,20 +8,6 @@
 #include "ssd1306.h"
 #include "tusb.h"
 
-enum state {
-    IDLE,
-    SLEEP,
-    WAKING,
-    REC_START,
-    GPS_WAIT,
-    RECORD,
-    REC_STOP,
-    SYNC_DATA,
-    SERVE_TCP,
-    MSC,
-};
-#define STATES_COUNT 10
-
 #define CHUNK_TYPE_RATES    0x00
 #define CHUNK_TYPE_TRAVEL   0x01
 #define CHUNK_TYPE_MARKER   0x02

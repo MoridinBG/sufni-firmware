@@ -39,4 +39,7 @@ struct travel_sensor {
     uint16_t (*measure)(struct travel_sensor *sensor);
 };
 
+extern struct travel_sensor fork_sensor;
+extern struct travel_sensor shock_sensor;
+
 #endif // TRAVEL_SENSOR_H
