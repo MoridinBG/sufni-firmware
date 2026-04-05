@@ -97,6 +97,12 @@ def generate():
     elif rear_imu_model['name'] == "NONE":
         rear_imu_proto = {"name": ""}
 
+    log_to_file_options = [
+        {"name": "OFF", "display_name": "Off"},
+        {"name": "ON", "display_name": "On"}
+    ]
+    log_to_file = get_choice("Log to file:", log_to_file_options, 0)  # Default Off
+
     # Construct the cache variables
     cache_variables = {
         "PICO_BOARD": board['variable'],
@@ -160,6 +166,9 @@ def generate():
         
         vars = cache_variables.copy()
         vars["CMAKE_BUILD_TYPE"] = build_type
+        if build_type == "Debug":
+            vars["USB_UART_DEBUG"] = "ON"
+            vars["LOG_TO_FILE"] = log_to_file['name']
         
         config_preset = {
             "name": full_preset_name,

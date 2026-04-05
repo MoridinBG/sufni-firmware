@@ -28,6 +28,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(USB_UART_DEBUG "Enable USB UART for debugging (disables MSC)" OFF)
+option(LOG_TO_FILE "Enable logging to file on the SD card" OFF)
 
 pico_sdk_init()
 
@@ -51,6 +52,7 @@ add_executable(sufni-suspension-telemetry
     src/rtc/ds3231.c
     src/ui/pushbutton.c
     src/util/config.c
+    src/util/log.c
     src/util/list.c
     src/sensor/travel/rotational.c
     src/sensor/travel/linear.c
@@ -248,6 +250,10 @@ else()
     target_compile_definitions(sufni-suspension-telemetry PRIVATE
         CFG_TUD_MSC=1
     )
+endif()
+
+if(LOG_TO_FILE)
+    target_compile_definitions(sufni-suspension-telemetry PRIVATE LOG_TO_FILE=1)
 endif()
 
 pico_add_extra_outputs(sufni-suspension-telemetry)
