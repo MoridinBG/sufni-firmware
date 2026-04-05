@@ -194,6 +194,7 @@ static void on_idle() {
 
 static void on_sleep() {
     LOG("POWER", "Entering sleep mode\n");
+    log_close();
     sleep_run_from_xosc();
     display_message(&disp, "SLEEP.");
 

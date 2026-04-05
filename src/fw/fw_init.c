@@ -195,6 +195,7 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
 #endif
 
     init_storage_and_runtime(disp);
+    log_init();
 
     // Sleep/wake restores these registers after deep sleep, so capture the post-init baseline once here.
     power_state->scb_orig = scb_hw->scr;
