@@ -1,46 +1,16 @@
 #include "calibration_flow.h"
 #include "../util/log.h"
 #include "calibration_storage.h"
+#include "display.h"
 #include "hardware_config.h"
+#include "helpers.h"
 
-#include "hardware/adc.h"
 #include "hardware/gpio.h"
-#include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
 #include <string.h>
 
 #define CAL_MAX_RETRIES 3
-
-// ----------------------------------------------------------------------------
-// Display & button helper functions
-
-// TODO: This duplicates some code from main, that would ideally be abstracted in it's own struct
-
-static void display_message(ssd1306_t *disp, const char *message) {
-    ssd1306_clear(disp);
-    ssd1306_draw_string(disp, 0, 10, 2, message);
-    ssd1306_show(disp);
-}
-
-static bool on_battery(void) {
-    cyw43_thread_enter();
-    bool ret = !cyw43_arch_gpio_get(2);
-    cyw43_thread_exit();
-    return ret;
-}
-
-static float read_voltage(void) {
-    cyw43_thread_enter();
-    sleep_ms(1);
-    adc_gpio_init(29);
-    adc_select_input(3);
-    uint32_t vsys = 0;
-    for (int i = 0; i < 3; i++) { vsys += adc_read(); }
-    cyw43_thread_exit();
-    const float conversion_factor = 3.3f / (1 << 12);
-    return vsys * conversion_factor;
-}
 
 static bool has_any_imu(struct calibration_ctx *ctx) {
     return (ctx->imu_frame && ctx->imu_frame->available) || (ctx->imu_fork && ctx->imu_fork->available) ||
