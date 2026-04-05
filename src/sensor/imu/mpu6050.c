@@ -1,4 +1,5 @@
 #include "mpu6050.h"
+#include "../../util/log.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "imu_sensor.h"
@@ -55,7 +56,7 @@ void mpu6050_init(struct imu_sensor *imu) {
 
     sleep_ms(100); // Give it some time to power up
 
-    printf("[MPU6050] Resetting...\n");
+    LOG("IMU", "MPU6050 Resetting...\n");
     write_register(imu, REG_PWR_MGMT_1, 0x80); // Device Reset
     sleep_ms(100);
     write_register(imu, REG_PWR_MGMT_1, 0x01); // Wake up, use PLL with X axis gyroscope reference
@@ -63,7 +64,7 @@ void mpu6050_init(struct imu_sensor *imu) {
 
     imu->available = mpu6050_check_availability(imu);
     if (!imu->available) {
-        printf("[MPU6050] Device not found!\n");
+        LOG("IMU", "MPU6050 Device not found!\n");
         return;
     }
 
