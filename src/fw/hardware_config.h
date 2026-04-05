@@ -104,6 +104,7 @@
 #else
 #define GPS_IRQ UART1_IRQ
 #endif
+#define GPS_BAUD_RATE 115200
 #endif
 
 // ----------------------------------------------------------------------------

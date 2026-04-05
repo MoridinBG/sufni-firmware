@@ -64,7 +64,7 @@ static void on_gps_fix(const struct gps_telemetry *t);
 struct gps_sensor gps = {
     .type = GPS_TYPE_LC76G,
     .protocol = GPS_PROTOCOL_UART,
-    .comm.uart = {GPS_UART_INST, GPS_PIN_TX, GPS_PIN_RX, 115200},
+    .comm.uart = {GPS_UART_INST, GPS_PIN_TX, GPS_PIN_RX, GPS_BAUD_RATE},
     .available = false,
     .on_fix = on_gps_fix,
     .init = lc76g_init,
@@ -306,6 +306,11 @@ static const uint16_t TRAVEL_SAMPLE_RATE = 1000;
 #if HAS_IMU
 static const uint16_t IMU_SAMPLE_RATE = 1000;
 #endif
+#if HAS_GPS
+static const uint16_t GPS_SAMPLE_RATE = 3;
+// Drain RX buffer at twice the fill rate
+static const int64_t GPS_RX_DRAIN_INTERVAL_US = -(int64_t)GPS_RX_BUFFER_SIZE * 1000000 / (GPS_BAUD_RATE / 10) / 2;
+#endif
 
 // We are using two buffers per sensor type. Data acquisition happens on core #1 into the active
 // buffer (referred to by the pointer active_travel_buffer) and we dump to Micro SD card
@@ -524,7 +529,7 @@ static void start_recording_session() {
 
 #if HAS_GPS
     if (gps.available && !skip_gps_recording) {
-        if (!add_repeating_timer_us(-50000, gps_timer_cb, NULL, &gps_timer)) {
+        if (!add_repeating_timer_us(GPS_RX_DRAIN_INTERVAL_US, gps_timer_cb, NULL, &gps_timer)) {
             display_message(&disp, "GPS TMR ERR");
             while (true) { tight_loop_contents(); }
         }
@@ -820,7 +825,7 @@ static void on_rec_start() {
         if (!gps.fix_tracker.ready) {
             gps.power_on(&gps);
         }
-        if (!add_repeating_timer_us(-50000, gps_timer_cb, NULL, &gps_timer)) {
+        if (!add_repeating_timer_us(GPS_RX_DRAIN_INTERVAL_US, gps_timer_cb, NULL, &gps_timer)) {
             display_message(&disp, "GPS TMR ERR");
             while (true) { tight_loop_contents(); }
         }
@@ -1199,7 +1204,7 @@ int main() {
 #if HAS_GPS
     if (gps_sensor_init(&gps)) {
         LOG("INIT", "GPS initialized\n");
-        if (!gps_sensor_configure(&gps, 100, true, true, true, true, false)) {
+        if (!gps_sensor_configure(&gps, 1000 / GPS_SAMPLE_RATE, true, true, true, true, false)) {
             LOG("INIT", "GPS configuration failed\n");
         }
         sleep_ms(50);
