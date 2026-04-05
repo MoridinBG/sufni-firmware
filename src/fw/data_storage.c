@@ -17,7 +17,7 @@
 
 static FIL recording;
 
-static int setup_storage(void) {
+int setup_storage(void) {
     static FATFS fs;
     FRESULT fr = f_mount(&fs, "", 1);
     if (fr != FR_OK) {
@@ -161,9 +161,6 @@ static void write_imu_chunk(uint16_t size, struct imu_record *buffer) {
 #endif
 
 void sd_writer_main(void) {
-    int err = setup_storage();
-    multicore_fifo_push_blocking(err);
-
     int index;
     enum command cmd;
     uint16_t size;
