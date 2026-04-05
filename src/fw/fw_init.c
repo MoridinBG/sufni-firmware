@@ -125,15 +125,16 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
 #endif
 }
 
-static void init_storage_and_runtime(ssd1306_t *disp) {
-    display_message(disp, "INIT STOR");
-    multicore_launch_core1(&sd_writer_main);
-    int err = (int)multicore_fifo_pop_blocking();
+static void init_storage(ssd1306_t *disp) {
+    int err = setup_storage();
     if (err < 0) {
+        setup_display(disp);
         halt_with_message(disp, "CARD ERR");
     }
     LOG("INIT", "Storage initialized\n");
+}
 
+static void init_runtime(ssd1306_t *disp) {
     if (!load_config()) {
         halt_with_message(disp, "CONF ERR");
     }
@@ -175,26 +176,31 @@ static void register_buttons(const struct fw_button_handlers *button_handlers) {
 enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *cal_ctx,
                    struct fw_power_state *power_state, const struct fw_button_handlers *button_handlers) {
     init_board_io();
+    init_pio_i2c_bus();
+    init_rtc_and_aon_timer(disp, rtc);
+    init_storage(disp);
+    log_init();
+
     init_travel_sensors();
 #if HAS_GPS
     init_gps_sensor();
 #endif
-    init_pio_i2c_bus();
 #if HAS_IMU
     init_imu_sensors();
 #endif
-    init_rtc_and_aon_timer(disp, rtc);
     setup_display(disp);
 
 #ifndef USB_UART_DEBUG
     if (msc_present()) {
         LOG("INIT", "Entering MSC mode\n");
+        log_close();
         display_message(disp, "MSC MODE");
         return MSC;
     }
 #endif
 
-    init_storage_and_runtime(disp);
+    multicore_launch_core1(&sd_writer_main);
+    init_runtime(disp);
 
     // Sleep/wake restores these registers after deep sleep, so capture the post-init baseline once here.
     power_state->scb_orig = scb_hw->scr;

@@ -1,4 +1,5 @@
 #include "lsm6dso.h"
+#include "../../util/log.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "hardware/spi.h"
@@ -81,7 +82,7 @@ void lsm6dso_init(struct imu_sensor *imu) {
 
     sleep_ms(10);
 
-    printf("[LSM6DSO] Resetting...\n");
+    LOG("IMU", "LSM6DSO Resetting...\n");
     write_register(imu, CTRL3_C, 0x01);
     sleep_ms(10);
 
