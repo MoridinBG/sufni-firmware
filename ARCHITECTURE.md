@@ -5,22 +5,34 @@ Firmware for a Pico W / Pico 2 W based mountain bike suspension telemetry data a
 ## High-level overview
 
 ```
-                Core 0                          Core 1
-        ┌─────────────────────┐        ┌──────────────────┐
-        │  State machine      │  FIFO  │  SD card writer  │
-        │  Sensor sampling    │───────>│  (data_storage_  │
-        │  (timer callbacks)  │<───────│   core1)         │
-        │  Button handling    │        └──────────────────┘
-        │  Display updates    │
-        │  WiFi / TCP / NTP   │
-        └─────────────────────┘
+Core 0                                Core 1
+┌───────────────────────────┐  FIFO  ┌───────────────────────────┐
+│ State machine             │───────>│ SD card writer            │
+│ Sensor sampling timers    │<───────│ `sd_writer_main`          │
+│ Buttons / display / WiFi  │        │ SST chunk serialization   │
+└───────────────────────────┘        └───────────────────────────┘
 ```
 
 The firmware uses both RP2040/RP2350 cores. Core 0 runs the main state machine, sensor sampling via repeating timer callbacks, and all I/O (display, buttons, WiFi). Core 1 is dedicated to writing data to the SD card. The two cores communicate via the Pico's hardware multicore FIFO using a command protocol (see Data pipeline).
 
+## Firmware module layout
+
+| Module | Responsibility |
+|---|---|
+| `main.c` | State transitions, handler table dispatch, button actions, sleep/wake, top-level control flow |
+| `fw_init.c` / `fw_init.h` | Boot path: board/display/storage/WiFi/RTC init, calibration setup/application, button registration, initial state selection |
+| `fw_state.h` | Shared `enum state` and volatile runtime flags used across modules |
+| `data_acquisition.c` / `data_acquisition.h` | Core 0 sampling timers, acquisition buffers, GPS wait/record callbacks, marker flushing, FIFO writer commands |
+| `data_storage.c` / `data_storage.h` | Core 1 writer loop (`sd_writer_main`), SST file creation, chunk serialization, file close |
+| `data_sync.c` / `data_sync.h` | WiFi upload workflow for recorded SST files |
+| `state_views.c` / `state_views.h` | State-specific rendering for `IDLE` and `GPS_WAIT` screens |
+| `sensor_setup.c` / `sensor_setup.h` | Compile-time-selected global GPS/IMU sensor instances |
+| `display.c` / `display.h` | Display setup and single-message helper |
+| `helpers.c` / `helpers.h` | Shared runtime helpers such as WiFi, USB, battery, and reset helpers |
+
 ## State machine
 
-The main loop (`main.c:1340`) dispatches to a handler function indexed by the current state:
+The main loop in `src/fw/main.c` dispatches to a handler function indexed by the current state. Startup work is delegated to `fw_init.c`, acquisition to `data_acquisition.c`, sync to `data_sync.c`, and some state rendering to `state_views.c`.
 
 | State | Trigger | Description |
 |---|---|---|
@@ -29,7 +41,7 @@ The main loop (`main.c:1340`) dispatches to a handler function indexed by the cu
 | `WAKING` | Button interrupt from SLEEP | Restores clocks, display, buttons. Transitions to IDLE. |
 | `REC_START` | Left press in IDLE | Applies calibration, inits sensors. If GPS available, goes to GPS_WAIT; otherwise starts recording. |
 | `GPS_WAIT` | GPS available during REC_START | Waits for reliable GPS fix (10 consecutive good fixes with 3D fix, >=6 sats, EPE<=6m). User can skip (left press) or confirm when ready. |
-| `RECORD` | After REC_START/GPS_WAIT | Active data acquisition. Timer callbacks sample sensors into double buffers. |
+| `RECORD` | After REC_START/GPS_WAIT | Active data acquisition. Repeating timer callbacks sample sensors into buffers while the main loop idles in the `RECORD` slot. |
 | `REC_STOP` | Left press in RECORD | Stops timers, flushes remaining data, closes file. |
 | `SYNC_DATA` | Left long-press in IDLE | Connects WiFi, pushes all SST files to configured server via TCP client, moves to `uploaded/`. |
 | `SERVE_TCP` | Right long-press in IDLE | Connects WiFi, starts TCP server with mDNS discovery. Clients can list/download/trash SST files. |
@@ -42,6 +54,8 @@ Button mapping:
 - **Right long-press**: Start TCP server
 
 ## Data pipeline
+
+Core 0 acquisition lives in `data_acquisition.c`; Core 1 writing lives in `data_storage.c`. The two halves communicate via the Pico's hardware multicore FIFO using a small command protocol.
 
 ### Double-buffer scheme
 
@@ -62,12 +76,12 @@ FIFO protocol - Core 0 pushes a command enum followed by command-specific argume
 
 | Command | Arguments (pushed after command) | Description |
 |---|---|---|
-| `OPEN` | (none) | Open new SST file. Core 1 replies with file index, then initial buffer pointers. |
-| `DUMP_TRAVEL` | `size`, `buffer_ptr` | Write travel chunk. Core 1 acks with buffer ptr before writing (non-blocking for Core 0). |
-| `DUMP_IMU` | `size`, `buffer_ptr` | Write IMU chunk. Same ack pattern. |
-| `DUMP_GPS` | `size`, `buffer_ptr` | Write GPS chunk. Same ack pattern. |
-| `MARKER` | (none) | Write a zero-length marker chunk to the file. |
-| `FINISH` | `travel_size`, `travel_ptr`, [`imu_size`, `imu_ptr`] | Flush remaining data and close file. |
+| `OPEN` | (none) | Open a new SST file. Core 1 replies with the file index and the writeable acquisition buffers. |
+| `DUMP_TRAVEL` | `size`, `buffer_ptr` | Write a travel chunk. Core 1 returns the buffer pointer immediately so Core 0 can keep sampling. |
+| `DUMP_IMU` | `size`, `buffer_ptr` | Write an IMU chunk. Same acknowledge-and-continue pattern. |
+| `DUMP_GPS` | `size`, `buffer_ptr` | Write a GPS chunk. Same acknowledge-and-continue pattern. |
+| `MARKER` | (none) | Write a zero-length marker chunk to the file after Core 0 has flushed any in-flight travel/IMU data. |
+| `FINISH` | (none) | Close the current SST file. Remaining travel/IMU/GPS data must already have been flushed by Core 0. |
 
 ### Sample rates and buffer sizes
 
@@ -197,7 +211,7 @@ On WiFi connect, syncs time from a configurable NTP server via SNTP. Updates bot
 
 ### TCP client (data sync)
 
-`on_sync_data()` connects to a configured server (`sst_server:sst_server_port`), pushes each SST file with a header containing board ID + file size + filename. Successfully sent files are moved to `uploaded/`.
+`sync_recorded_data()` in `src/fw/data_sync.c` connects to a configured server (`sst_server:sst_server_port`), pushes each SST file with a header containing board ID + file size + filename, and moves successfully sent files to `uploaded/`.
 
 ### TCP server (remote access)
 

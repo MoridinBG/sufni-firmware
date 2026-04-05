@@ -6,7 +6,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive: state machine, SS
 
 ## Quick orientation
 
-- `src/fw/main.c` - Entry point, state machine, dual-core data pipeline, sensor init
+- `src/fw/main.c` - Entry point, top-level state machine, button handling, sleep/wake transitions
+- `src/fw/fw_init.c` - Boot/init workflow: board, display, storage, RTC, WiFi, calibration, initial state selection
+- `src/fw/fw_state.h` - Shared runtime state and state enum used across firmware modules
+- `src/fw/data_acquisition.c` - Core 0 acquisition timers, sensor buffers, markers, Core 1 writer protocol
+- `src/fw/data_storage.c` - Core 1 SD writer and SST chunk serialization
+- `src/fw/data_sync.c` - WiFi upload/sync workflow for recorded SST files
+- `src/fw/state_views.c` - State-specific display rendering for `IDLE` and `GPS_WAIT`
+- `src/fw/sensor_setup.c` - Compile-time-selected global GPS/IMU sensor instances
+- `src/fw/display.c` / `src/fw/helpers.c` - Shared display setup and runtime helpers
 - `src/fw/sst.h` - SST binary format structs and chunk type definitions (source of truth for the format)
 - `src/fw/hardware_config.h` - Pin assignments and hardware variant `#define`s
 - `src/sensor/` - Sensor drivers: `travel/` (AS5600, linear ADC), `imu/` (MPU6050, LSM6DSO), `gps/` (LC76G)
@@ -14,10 +22,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive: state machine, SS
 - `src/fw/calibration_storage.c` - Binary calibration file read/write
 - `src/net/` - TCP client (push files to server) and TCP server (serve files via mDNS)
 - `src/msc/` - USB Mass Storage mode (TinyUSB)
-- `src/ntp/` - NTP time sync, RTC timestamp helpers
-- `src/rtc/` - DS3231 external RTC driver over PIO I2C
-- `src/util/config.c` - SD card config file parser
-- `external/` - Third-party libs: FatFS+SD driver, AS5600, SSD1306, lwgps (forked for Quectel PQTM)
 - `test_utils/` - Python scripts to inspect SST files and extract GPS tracks to GPX
 - `generate_cmake_presets.py` - Interactive cmake preset generator for hardware configs
 
@@ -48,6 +52,7 @@ Configure via cmake presets or `-D` flags. See ARCHITECTURE.md for the full tabl
 ## Architecture highlights
 
 - **Dual-core**: Core 0 samples sensors via timer callbacks; Core 1 writes to SD card. Double-buffered per sensor type, coordinated via hardware FIFO.
+- **Decomposed firmware flow**: `main.c` owns state transitions while init, acquisition, sync, display views, and shared helpers live in focused `src/fw/` modules.
 - **Compile-time polymorphism**: Sensor structs use function pointers set via designated initializers, selected by `#ifdef`. No runtime dispatch overhead.
 - **SST format**: TLV binary, little-endian, packed structs. See ARCHITECTURE.md for the full format reference.
 - **IMU calibration**: Two-phase (stationary + tilted) determines gyro bias, gravity vector, and forward direction. Builds a rotation matrix to map arbitrary sensor mounting to bike frame coordinates (X=forward, Y=left, Z=up). Temperature compensated.
