@@ -106,9 +106,8 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
 
     LOG("DS3231", "Reading datetime\n");
     if (!ds3231_get_datetime(&rtc, &tm_now)) {
-        LOG("DS3231", "RTC not connected\n");
-        setup_display(&disp);
-        halt_with_message(disp, "RTC ERR");
+        LOG("DS3231", "RTC not connected, defaulting to 2000-01-01 00:00\n");
+        tm_now = (struct tm){.tm_year = 100, .tm_mon = 0, .tm_mday = 1};
     }
     LOG("DS3231", "Time: %04d-%02d-%02d %02d:%02d:%02d\n", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
         tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
