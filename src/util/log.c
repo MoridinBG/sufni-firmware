@@ -7,6 +7,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -15,7 +16,7 @@
 static FIL log_file;
 static bool log_file_open = false;
 
-static char early_buf[EARLY_BUF_SIZE];
+static char *early_buf = NULL;
 static int early_buf_pos = 0;
 
 void log_init(void) {
@@ -36,6 +37,8 @@ void log_init(void) {
             f_sync(&log_file);
         }
     }
+    free(early_buf);
+    early_buf = NULL;
     early_buf_pos = 0;
 }
 
@@ -60,7 +63,14 @@ void log_write(const char *source, const char *fmt, ...) {
     if (log_file_open) {
         f_write(&log_file, buf, n, NULL);
         f_sync(&log_file);
-    } else if (early_buf_pos + n <= EARLY_BUF_SIZE) {
+    } else if (early_buf_pos >= 0 && early_buf_pos + n <= EARLY_BUF_SIZE) {
+        if (!early_buf) {
+            early_buf = malloc(EARLY_BUF_SIZE);
+            if (!early_buf) {
+                early_buf_pos = -1;
+                return;
+            }
+        }
         memcpy(early_buf + early_buf_pos, buf, n);
         early_buf_pos += n;
     }
