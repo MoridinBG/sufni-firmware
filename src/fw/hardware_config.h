@@ -45,7 +45,7 @@
 
 #ifdef SPI_MICROSD
 #define MICROSD_SPI      spi0
-#define BAUD_RATE        (25 * 1000 * 1000)
+#define BAUD_RATE        (20 * 1000 * 1000)
 #define MICROSD_PIN_MISO 16
 #define MICROSD_PIN_MOSI 19
 #define MICROSD_PIN_SCK  18
@@ -81,5 +81,117 @@
 #define SHOCK_PIN_SDA 14
 #define SHOCK_PIN_SCL 15
 #endif // SHOCK_LINEAR
+
+// ----------------------------------------------------------------------------
+// GPS Definitions
+
+#define GPS_NONE  0
+#define GPS_LC76G 1
+
+#ifndef GPS_MODULE
+#define GPS_MODULE GPS_NONE
+#endif
+
+#define HAS_GPS (GPS_MODULE != GPS_NONE)
+
+#if HAS_GPS
+#define GPS_UART_NUM  0
+#define GPS_UART_INST uart0
+#define GPS_PIN_TX    0
+#define GPS_PIN_RX    1
+#if GPS_UART_NUM == 0
+#define GPS_IRQ UART0_IRQ
+#else
+#define GPS_IRQ UART1_IRQ
+#endif
+#define GPS_BAUD_RATE 115200
+#endif
+
+// ----------------------------------------------------------------------------
+// IMU Definitions
+
+#define IMU_NONE    0
+#define IMU_MPU6050 1
+#define IMU_LSM6DSO 2
+
+// Frame IMU
+#ifndef IMU_FRAME
+#define IMU_FRAME IMU_NONE
+#endif
+
+#if IMU_FRAME != IMU_NONE
+#ifdef IMU_FRAME_SPI
+#define IMU_FRAME_SPI_INST spi1
+#define IMU_FRAME_PIN_MISO 12
+#define IMU_FRAME_PIN_MOSI 11
+#define IMU_FRAME_PIN_SCK  10
+#define IMU_FRAME_PIN_CS   13
+#else
+#define IMU_FRAME_I2C_INST i2c1
+#if IMU_FRAME == IMU_MPU6050
+#define IMU_FRAME_ADDRESS 0x68
+#else
+#define IMU_FRAME_ADDRESS 0x6B
+#endif
+#define IMU_FRAME_PIN_SDA 14
+#define IMU_FRAME_PIN_SCL 15
+#endif
+#endif
+
+// Fork IMU
+#ifndef IMU_FORK
+#define IMU_FORK IMU_NONE
+#endif
+
+#if IMU_FORK != IMU_NONE
+#ifdef IMU_FORK_SPI
+#define IMU_FORK_SPI_INST spi1
+#define IMU_FORK_PIN_MISO 12
+#define IMU_FORK_PIN_MOSI 11
+#define IMU_FORK_PIN_SCK  10
+#define IMU_FORK_PIN_CS   13
+#else
+#define IMU_FORK_I2C_INST i2c0
+#if IMU_FORK == IMU_MPU6050
+#define IMU_FORK_ADDRESS 0x68
+#else
+#define IMU_FORK_ADDRESS 0x6B
+#endif
+#define IMU_FORK_PIN_SDA 8
+#define IMU_FORK_PIN_SCL 9
+#endif
+#endif
+
+// Rear IMU
+#ifndef IMU_REAR
+#define IMU_REAR IMU_NONE
+#endif
+
+#if IMU_REAR != IMU_NONE
+#ifdef IMU_REAR_SPI
+#define IMU_REAR_SPI_INST spi1
+#define IMU_REAR_PIN_MISO 12
+#define IMU_REAR_PIN_MOSI 11
+#define IMU_REAR_PIN_SCK  10
+#define IMU_REAR_PIN_CS   13
+#else
+#define IMU_REAR_I2C_INST i2c0
+#if IMU_REAR == IMU_MPU6050
+#define IMU_REAR_ADDRESS 0x68
+#else
+#define IMU_REAR_ADDRESS 0x6B
+#endif
+#define IMU_REAR_PIN_SDA 8
+#define IMU_REAR_PIN_SCL 9
+#endif
+#endif
+
+// IMU count and convenience flag
+#define IMU_FRAME_ENABLED (IMU_FRAME != IMU_NONE)
+#define IMU_FORK_ENABLED  (IMU_FORK != IMU_NONE)
+#define IMU_REAR_ENABLED  (IMU_REAR != IMU_NONE)
+
+#define IMU_COUNT (IMU_FRAME_ENABLED + IMU_FORK_ENABLED + IMU_REAR_ENABLED)
+#define HAS_IMU   (IMU_COUNT > 0)
 
 #endif // _HARDWARE_CONFIG_H

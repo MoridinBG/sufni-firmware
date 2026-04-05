@@ -1,0 +1,15 @@
+[submodule "external/pico-as5600"]
+	path = external/pico-as5600
+	url = https://github.com/sghctoma/pico-as5600
+[submodule "external/pico-ssd1306"]
+	path = external/pico-ssd1306
+	url = https://github.com/sghctoma/pico-ssd1306
+	branch = multi-submodule
+[submodule "external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico"]
+	path = external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
+	url = https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
+	branch = main
+[submodule "external/lwgps"]
+	path = external/lwgps
+	url = https://github.com/MoridinBG/lwgps
+	branch = develop

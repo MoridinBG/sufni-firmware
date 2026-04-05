@@ -1,0 +1,29 @@
+# Build
+build/
+.cache/
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# VSCode
+.vscode/
+
+# Pico SDK / VSCode Pico extension
+.pico-sdk/
+.picobuild/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor swap/backup
+*~
+*.swp
+*.swo
