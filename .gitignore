@@ -1,5 +1,6 @@
 # Build
 build/
+.cache/
 
 # CMake generated
 CMakeCache.txt
