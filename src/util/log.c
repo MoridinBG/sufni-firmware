@@ -7,10 +7,16 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
+
+#define EARLY_BUF_SIZE 2048
 
 static FIL log_file;
 static bool log_file_open = false;
+
+static char early_buf[EARLY_BUF_SIZE];
+static int early_buf_pos = 0;
 
 void log_init(void) {
     time_t now = rtc_timestamp();
@@ -25,7 +31,12 @@ void log_init(void) {
     FRESULT fr = f_open(&log_file, filename, FA_CREATE_ALWAYS | FA_WRITE);
     if (fr == FR_OK) {
         log_file_open = true;
+        if (early_buf_pos > 0) {
+            f_write(&log_file, early_buf, early_buf_pos, NULL);
+            f_sync(&log_file);
+        }
     }
+    early_buf_pos = 0;
 }
 
 void log_close(void) {
@@ -49,6 +60,9 @@ void log_write(const char *source, const char *fmt, ...) {
     if (log_file_open) {
         f_write(&log_file, buf, n, NULL);
         f_sync(&log_file);
+    } else if (early_buf_pos + n <= EARLY_BUF_SIZE) {
+        memcpy(early_buf + early_buf_pos, buf, n);
+        early_buf_pos += n;
     }
 }
 
