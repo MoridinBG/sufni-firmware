@@ -257,6 +257,11 @@ static void live_queue_stop_request(struct tcpserver *server) {
     }
 }
 
+bool live_stream_core1_can_accept_client(const struct tcpserver *server) {
+    return live_stream_get_control_state() == LIVE_CONTROL_IDLE && !live_stream_shared.active &&
+           !server->live_session_active && !server->live_start_pending && !server->live_stop_pending;
+}
+
 void live_stream_core1_reset(struct tcpserver *server) {
     server->protocol_mode = TCPSERVER_PROTOCOL_UNKNOWN;
     server->live_session_active = false;
@@ -328,6 +333,7 @@ void live_stream_core1_service(struct tcpserver *server) {
         if (server->client_pcb != NULL) {
             live_send_stop_ack(server);
         }
+        server->live_start_pending = false;
         server->live_session_active = false;
         server->live_stop_pending = false;
         live_stream_set_control_state(LIVE_CONTROL_IDLE);
@@ -343,7 +349,11 @@ void live_stream_core1_service(struct tcpserver *server) {
 }
 
 void live_stream_core1_abort(struct tcpserver *server) {
-    if (server->live_session_active && !server->live_stop_pending) {
+    if ((server->live_start_pending || server->live_session_active || server->live_stop_pending ||
+         live_stream_shared.active || live_stream_get_control_state() != LIVE_CONTROL_IDLE) &&
+        !server->live_stop_pending) {
+        server->live_start_pending = false;
+        server->live_session_active = live_stream_shared.active;
         server->live_stop_pending = true;
         live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
     }

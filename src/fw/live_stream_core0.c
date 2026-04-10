@@ -1,5 +1,6 @@
 #include "live_stream_core0.h"
 
+#include "calibration_flow.h"
 #include "data_acquisition.h"
 #include "sensor_setup.h"
 
@@ -269,6 +270,12 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
     requested_mask = req->sensor_mask;
     if (requested_mask == 0 || req->protocol_version != LIVE_PROTOCOL_VERSION) {
         resp->result = LIVE_START_RESULT_INVALID_REQUEST;
+        return false;
+    }
+
+    if ((requested_mask & (LIVE_SENSOR_MASK_TRAVEL | LIVE_SENSOR_MASK_IMU)) != 0u &&
+        !calibration_refresh_active_sensors()) {
+        resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
         return false;
     }
 

@@ -35,4 +35,8 @@ bool calibration_run(struct calibration_ctx *ctx);
 // Returns true if at least one travel sensor is available
 bool calibration_apply_to_sensors(struct calibration_ctx *ctx);
 
+// Reload stored calibration and apply it to the current global sensor instances.
+// Unlike calibration_apply_to_sensors, this does not wait for a travel sensor to appear.
+bool calibration_refresh_active_sensors(void);
+
 #endif // CALIBRATION_FLOW_H

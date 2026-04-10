@@ -135,6 +135,12 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err)
         return ERR_VAL;
     }
 
+    if (!live_stream_core1_can_accept_client(server)) {
+        LOG("TCP", "Rejecting client while live teardown is pending\n");
+        tcp_abort(client_pcb);
+        return ERR_ABRT;
+    }
+
     LOG("TCP", "Client connected\n");
     server->client_pcb = client_pcb;
     tcp_arg(client_pcb, server);
@@ -541,7 +547,11 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
             continue;
         }
 
-        if (server->status == STATUS_FILE_REQUESTED) {
+        if (server->status < 0) {
+            live_stream_core1_abort(server);
+            LOG("TCP", "Client/session error: %d\n", server->status);
+            server->status = STATUS_INITIALIZED;
+        } else if (server->status == STATUS_FILE_REQUESTED) {
             if (!tcpserver_process(server)) {
                 LOG("TCP", "Request processing failed\n");
                 server->status = STATUS_INITIALIZED;
@@ -549,10 +559,6 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
         } else if (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE || server->live_session_active ||
                    server->live_start_pending || server->live_stop_pending) {
             live_stream_core1_service(server);
-        } else if (server->status < 0) {
-            live_stream_core1_abort(server);
-            LOG("TCP", "Client/session error: %d\n", server->status);
-            server->status = STATUS_INITIALIZED;
         }
         sleep_ms(1);
     }
