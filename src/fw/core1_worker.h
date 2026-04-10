@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "../net/tcpserver.h"
+
 #include "core1_ipc.h"
 
 struct core1_worker_status {
@@ -14,6 +16,7 @@ struct core1_worker_status {
 extern volatile struct core1_worker_status core1_worker_status;
 
 void core1_worker_main(void);
+void core1_configure_tcp_server(const struct tcpserver_options *options);
 bool core1_request_mode(enum core1_mode mode);
 bool core1_request_stop(void);
 bool core1_wait_next_event(enum core1_dispatch_event *event_id, int32_t *event_data);

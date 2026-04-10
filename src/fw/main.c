@@ -22,6 +22,8 @@
 // For scb_hw so we can enable deep sleep
 #include "hardware/structs/scb.h"
 
+#include "../net/tcpserver.h"
+#include "../net/wifi.h"
 #include "../ntp//ntp.h"
 #include "../rtc//ds3231.h"
 #include "../sensor/travel/travel_sensor.h"
@@ -59,7 +61,7 @@ volatile float gps_last_epe = 0.0f;
 static struct fw_power_state power_state;
 
 static ssd1306_t disp;
-static volatile bool serve_tcp_stop_requested = false;
+static volatile bool tcp_session_stop_requested = false;
 
 struct ds3231 rtc;
 
@@ -149,11 +151,6 @@ static void on_rec_stop() {
     state = IDLE;
     display_message(&disp, "IDLE");
     recording_stop();
-}
-
-static void on_sync_data() {
-    sync_recorded_data(&disp);
-    state = IDLE;
 }
 
 static void on_idle() {
@@ -247,24 +244,31 @@ static void on_disabled_gps() { tight_loop_contents(); }
 // RECORD work runs from acquisition timers after recording_start, so the main loop only idles here.
 static void on_rec() { tight_loop_contents(); }
 
-static void on_serve_tcp() {
+static void run_tcp_session(enum state session_state, const char *ready_message, bool allow_live_preview) {
+    struct tcpserver_options tcp_options = {
+        .allow_live_preview = allow_live_preview,
+        .enable_mdns = true,
+        .mark_downloaded_on_success = true,
+    };
     enum core1_dispatch_event event_id;
     int32_t event_data = 0;
 
-    serve_tcp_stop_requested = false;
+    tcp_session_stop_requested = false;
     display_message(&disp, "CONNECT");
-    if (!wifi_connect(true)) {
+    if (!wifi_start_from_config(true)) {
         display_message(&disp, "CONN ERR");
         sleep_ms(1000);
-        wifi_disconnect();
+        wifi_stop();
         state = IDLE;
         return;
     }
 
+    core1_configure_tcp_server(&tcp_options);
+
     if (!core1_request_mode(CORE1_MODE_TCP_SERVER)) {
         display_message(&disp, "SRV BUSY");
         sleep_ms(1000);
-        wifi_disconnect();
+        wifi_stop();
         state = IDLE;
         return;
     }
@@ -272,7 +276,7 @@ static void on_serve_tcp() {
     if (!core1_wait_next_event(&event_id, &event_data)) {
         display_message(&disp, "SRV IPC");
         sleep_ms(1000);
-        wifi_disconnect();
+        wifi_stop();
         state = IDLE;
         return;
     }
@@ -280,19 +284,23 @@ static void on_serve_tcp() {
     if (event_id != CORE1_DISPATCH_EVENT_TCP_SERVER_READY) {
         display_message(&disp, "SRV ERR");
         sleep_ms(1000);
-        wifi_disconnect();
+        wifi_stop();
         state = IDLE;
         return;
     }
 
-    display_message(&disp, "SERVER ON");
-    while (state == SERVE_TCP) {
-        live_stream_core0_service();
+    display_message(&disp, ready_message);
+    while (state == session_state) {
+        if (allow_live_preview) {
+            live_stream_core0_service();
+        }
 
-        if (serve_tcp_stop_requested) {
-            live_stream_core0_stop();
+        if (tcp_session_stop_requested) {
+            if (allow_live_preview) {
+                live_stream_core0_stop();
+            }
             core1_request_stop();
-            serve_tcp_stop_requested = false;
+            tcp_session_stop_requested = false;
         }
 
         if (core1_poll_event(&event_id, &event_data)) {
@@ -305,7 +313,22 @@ static void on_serve_tcp() {
         sleep_ms(1);
     }
 
-    wifi_disconnect();
+    if (allow_live_preview) {
+        live_stream_core0_stop();
+    }
+    wifi_stop();
+    state = IDLE;
+}
+
+static void on_serve_tcp() { run_tcp_session(SERVE_TCP, "SERVER ON", true); }
+
+static void on_sync_data() {
+    if (config.wifi_mode == WIFI_MODE_AP) {
+        run_tcp_session(SYNC_DATA, "READY DL", false);
+        return;
+    }
+
+    sync_recorded_data(&disp);
     state = IDLE;
 }
 
@@ -371,7 +394,12 @@ static void on_right_press(void *user_data) {
             LOG("REC", "Marker set\n");
             break;
         case SERVE_TCP:
-            serve_tcp_stop_requested = true;
+            tcp_session_stop_requested = true;
+            break;
+        case SYNC_DATA:
+            if (config.wifi_mode == WIFI_MODE_AP) {
+                tcp_session_stop_requested = true;
+            }
             break;
         default:
             break;

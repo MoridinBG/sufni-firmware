@@ -48,8 +48,10 @@ add_executable(sufni-suspension-telemetry
     src/fw/calibration_storage.c
     src/fw/calibration_flow.c
     src/fs/microsd.c
+    src/net/dhcpserver.c
     src/net/tcpclient.c
     src/net/tcpserver.c
+    src/net/wifi.c
     src/net/live_stream_core1.c
     src/ntp/ntp.c
     src/pio_i2c/pio_i2c.c
@@ -62,6 +64,10 @@ add_executable(sufni-suspension-telemetry
     src/sensor/travel/linear.c
     src/sensor/imu/imu_sensor.c
 )
+
+pico_configure_ip4_address(sufni-suspension-telemetry PRIVATE CYW43_DEFAULT_IP_AP_ADDRESS "192.168.4.1")
+pico_configure_ip4_address(sufni-suspension-telemetry PRIVATE CYW43_DEFAULT_IP_AP_GATEWAY "192.168.4.1")
+pico_configure_ip4_address(sufni-suspension-telemetry PRIVATE CYW43_DEFAULT_IP_MASK "255.255.255.0")
 
 if(NOT IMU_FRAME)
     set(IMU_FRAME "NONE")

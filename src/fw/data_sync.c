@@ -1,9 +1,9 @@
 #include "data_sync.h"
 
 #include "display.h"
-#include "helpers.h"
 
 #include "../net/tcpclient.h"
+#include "../net/wifi.h"
 #include "../util/list.h"
 #include "../util/log.h"
 
@@ -29,11 +29,11 @@ void sync_recorded_data(ssd1306_t *disp) {
     LOG("SYNC", "Starting data sync\n");
     display_message(disp, "CONNECT");
 
-    if (!wifi_connect(true)) {
+    if (!wifi_start_from_config(true)) {
         LOG("SYNC", "Could not connect wifi\n");
         display_message(disp, "CONN ERR");
         sleep_ms(1000);
-        wifi_disconnect();
+        wifi_stop();
         return;
     }
 
@@ -80,5 +80,5 @@ void sync_recorded_data(ssd1306_t *disp) {
     LOG("SYNC", "Sync complete: %u succeeded, %u failed\n", total_files - failed_files, failed_files);
 
     sleep_ms(3000);
-    wifi_disconnect();
+    wifi_stop();
 }

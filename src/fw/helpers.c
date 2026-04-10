@@ -1,9 +1,5 @@
 #include "helpers.h"
 
-#include "../ntp/ntp.h"
-#include "../util/config.h"
-#include "../util/log.h"
-
 #include "hardware/adc.h"
 #include "hardware/watchdog.h"
 #include "pico/cyw43_arch.h"
@@ -47,27 +43,4 @@ bool msc_present(void) {
     }
     return true;
 #endif
-}
-
-bool wifi_connect(bool do_ntp) {
-    LOG("WiFi", "Enabling STA mode\n");
-    cyw43_arch_enable_sta_mode();
-    LOG("WiFi", "Connecting to SSID: %s\n", config.ssid);
-    bool ret = cyw43_arch_wifi_connect_timeout_ms(config.ssid, config.psk, CYW43_AUTH_WPA2_AES_PSK, 20000) == 0;
-    if (ret) {
-        LOG("WiFi", "Connected successfully\n");
-        if (do_ntp) {
-            LOG("WiFi", "Syncing RTC to NTP\n");
-            sync_rtc_to_ntp();
-        }
-    } else {
-        LOG("WiFi", "Connection failed\n");
-    }
-    return ret;
-}
-
-void wifi_disconnect(void) {
-    LOG("WiFi", "Disconnecting\n");
-    cyw43_arch_disable_sta_mode();
-    sleep_ms(100);
 }

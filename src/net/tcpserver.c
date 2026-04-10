@@ -8,6 +8,7 @@
 #include "lwip/tcpbase.h"
 #include "pico/time.h"
 #include "pico/unique_id.h"
+#include "wifi.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -99,8 +100,15 @@ err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err
             if (server->protocol_mode == TCPSERVER_PROTOCOL_UNKNOWN && server->rx_len >= sizeof(uint32_t)) {
                 uint32_t magic;
                 memcpy(&magic, server->rx_buffer, sizeof(magic));
-                server->protocol_mode =
-                    magic == LIVE_PROTOCOL_MAGIC ? TCPSERVER_PROTOCOL_LIVE : TCPSERVER_PROTOCOL_LEGACY;
+                if (magic == LIVE_PROTOCOL_MAGIC) {
+                    if (!server->options.allow_live_preview) {
+                        tcp_server_result(arg, -1);
+                    } else {
+                        server->protocol_mode = TCPSERVER_PROTOCOL_LIVE;
+                    }
+                } else {
+                    server->protocol_mode = TCPSERVER_PROTOCOL_LEGACY;
+                }
             }
 
             if (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE) {
@@ -474,11 +482,13 @@ static bool tcpserver_process(struct tcpserver *server) {
     } else if (server->requested_file < 0) {
         return process_sst_file_trash(server);
     } else if (process_sst_file_request(server)) {
-        TCHAR path_old[10];
-        TCHAR path_new[19];
-        sprintf(path_old, "%05d.SST", server->requested_file);
-        sprintf(path_new, "uploaded/%s", path_old);
-        f_rename(path_old, path_new);
+        if (server->options.mark_downloaded_on_success) {
+            TCHAR path_old[10];
+            TCHAR path_new[19];
+            sprintf(path_old, "%05d.SST", server->requested_file);
+            sprintf(path_new, "uploaded/%s", path_old);
+            f_rename(path_old, path_new);
+        }
         return true;
     }
 
@@ -487,8 +497,14 @@ static bool tcpserver_process(struct tcpserver *server) {
 
 static void tcpserver_teardown(struct tcpserver *server) {
     tcp_server_close(server);
-    mdns_resp_del_service(netif_default, server->mdns_slot);
-    mdns_resp_remove_netif(netif_default);
+    if (server->mdns_service_added && server->netif != NULL) {
+        mdns_resp_del_service(server->netif, server->mdns_slot);
+        server->mdns_service_added = false;
+    }
+    if (server->mdns_netif_added && server->netif != NULL) {
+        mdns_resp_remove_netif(server->netif);
+        server->mdns_netif_added = false;
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -504,7 +520,7 @@ static void mdns_srv_txt(struct mdns_service *service, void *txt_userdata) {
 // ----------------------------------------------------------------------------
 // "Public" functions
 
-bool tcpserver_init(struct tcpserver *server) {
+bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *options) {
     pico_get_unique_board_id(&board_id);
 
     LOG("TCP", "Initializing server\n");
@@ -514,18 +530,45 @@ bool tcpserver_init(struct tcpserver *server) {
     server->sent_len = 0;
     server->client_pcb = NULL;
     server->server_pcb = NULL;
+    server->netif = wifi_active_netif();
+    server->mdns_slot = -1;
+    server->mdns_netif_added = false;
+    server->mdns_service_added = false;
+    server->options = options != NULL ? *options
+                                      : (struct tcpserver_options){
+                                            .allow_live_preview = true,
+                                            .enable_mdns = true,
+                                            .mark_downloaded_on_success = true,
+                                        };
     live_stream_core1_reset(server);
 
-    if (server->mdns_initialized) {
-        mdns_resp_restart(netif_default);
-    } else {
-        mdns_resp_init();
-        server->mdns_initialized = true;
+    if (server->netif == NULL) {
+        LOG("TCP", "No active netif available for TCP server\n");
+        return false;
     }
-    mdns_resp_add_netif(netif_default, "sufni_telemetry_daq");
-    server->mdns_slot =
-        mdns_resp_add_service(netif_default, "sufnidaq", "_gosst", DNSSD_PROTO_TCP, 1557, mdns_srv_txt, NULL);
-    mdns_resp_announce(netif_default);
+
+    if (server->options.enable_mdns) {
+        if (server->mdns_initialized) {
+            mdns_resp_restart(server->netif);
+        } else {
+            mdns_resp_init();
+            server->mdns_initialized = true;
+        }
+
+        if (mdns_resp_add_netif(server->netif, "sufni_telemetry_daq") == ERR_OK) {
+            server->mdns_netif_added = true;
+            server->mdns_slot =
+                mdns_resp_add_service(server->netif, "sufnidaq", "_gosst", DNSSD_PROTO_TCP, 1557, mdns_srv_txt, NULL);
+            if (server->mdns_slot >= 0) {
+                server->mdns_service_added = true;
+                mdns_resp_announce(server->netif);
+            } else {
+                LOG("TCP", "mDNS service registration failed\n");
+            }
+        } else {
+            LOG("TCP", "mDNS netif registration failed\n");
+        }
+    }
 
     if (!tcp_server_open(server)) {
         LOG("TCP", "Failed to open server\n");
@@ -533,7 +576,7 @@ bool tcpserver_init(struct tcpserver *server) {
         return false;
     }
 
-    LOG("TCP", "Server listening on port %d, IP: %s\n", TCP_PORT, ip4addr_ntoa(netif_ip4_addr(netif_default)));
+    LOG("TCP", "Server listening on port %d, IP: %s\n", TCP_PORT, ip4addr_ntoa(netif_ip4_addr(server->netif)));
     server->status = STATUS_INITIALIZED;
 
     return true;
@@ -548,7 +591,9 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
         }
 
         if (server->status < 0) {
-            live_stream_core1_abort(server);
+            if (server->options.allow_live_preview) {
+                live_stream_core1_abort(server);
+            }
             LOG("TCP", "Client/session error: %d\n", server->status);
             server->status = STATUS_INITIALIZED;
         } else if (server->status == STATUS_FILE_REQUESTED) {
@@ -556,8 +601,9 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
                 LOG("TCP", "Request processing failed\n");
                 server->status = STATUS_INITIALIZED;
             }
-        } else if (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE || server->live_session_active ||
-                   server->live_start_pending || server->live_stop_pending) {
+        } else if (server->options.allow_live_preview &&
+                   (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE || server->live_session_active ||
+                    server->live_start_pending || server->live_stop_pending)) {
             live_stream_core1_service(server);
         }
         sleep_ms(1);

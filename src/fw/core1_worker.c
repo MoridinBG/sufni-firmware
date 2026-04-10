@@ -15,6 +15,11 @@ volatile struct core1_worker_status core1_worker_status = {
 };
 
 static struct tcpserver core1_tcp_server;
+static struct tcpserver_options core1_tcp_server_options = {
+    .allow_live_preview = true,
+    .enable_mdns = true,
+    .mark_downloaded_on_success = true,
+};
 static volatile bool core1_stop_requested = false;
 
 static void core1_send_dispatch_event(enum core1_dispatch_event event_id, int32_t event_data) {
@@ -60,11 +65,12 @@ static void core1_run_storage_backend(void) {
 
 static void core1_run_tcp_backend(void) {
     int status = 0;
+    struct tcpserver_options options = core1_tcp_server_options;
 
     core1_stop_requested = false;
     core1_set_mode(CORE1_MODE_TCP_SERVER);
 
-    if (!tcpserver_init(&core1_tcp_server)) {
+    if (!tcpserver_init(&core1_tcp_server, &options)) {
         core1_worker_status.last_error = PICO_ERROR_GENERIC;
         core1_set_mode(CORE1_MODE_ERROR);
         core1_send_dispatch_event(CORE1_DISPATCH_EVENT_BACKEND_ERROR, PICO_ERROR_GENERIC);
@@ -82,6 +88,19 @@ static void core1_run_tcp_backend(void) {
 
     core1_set_mode(CORE1_MODE_IDLE);
     core1_send_dispatch_event(CORE1_DISPATCH_EVENT_BACKEND_COMPLETE, status);
+}
+
+void core1_configure_tcp_server(const struct tcpserver_options *options) {
+    if (options == NULL) {
+        core1_tcp_server_options = (struct tcpserver_options){
+            .allow_live_preview = true,
+            .enable_mdns = true,
+            .mark_downloaded_on_success = true,
+        };
+        return;
+    }
+
+    core1_tcp_server_options = *options;
 }
 
 enum core1_mode core1_get_mode(void) { return core1_worker_status.mode; }

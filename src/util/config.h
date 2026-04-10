@@ -1,12 +1,20 @@
-#ifndef _CONFIG_H
-#define _CONFIG_H
+#ifndef SUFNI_FW_UTIL_CONFIG_H
+#define SUFNI_FW_UTIL_CONFIG_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
+enum wifi_mode {
+    WIFI_MODE_STA,
+    WIFI_MODE_AP,
+};
+
 struct config {
-    char ssid[33];
-    char psk[64];
+    enum wifi_mode wifi_mode;
+    char sta_ssid[33];
+    char sta_psk[64];
+    char ap_ssid[33];
+    char ap_psk[64];
     char ntp_server[264];
     char sst_server[264];
     char timezone[100];
@@ -18,4 +26,4 @@ extern struct config config;
 
 bool load_config();
 
-#endif // _CONFIG_H
+#endif // SUFNI_FW_UTIL_CONFIG_H
