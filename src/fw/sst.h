@@ -78,8 +78,6 @@ struct imu_record {
     int16_t gx, gy, gz;
 };
 
-enum command { OPEN, DUMP_TRAVEL, DUMP_GPS, DUMP_IMU, FINISH, MARKER };
-
 #define BUFFER_SIZE     2048
 #define GPS_BUFFER_SIZE 30
 

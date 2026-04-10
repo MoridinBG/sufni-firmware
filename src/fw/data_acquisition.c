@@ -1,5 +1,7 @@
 #include "data_acquisition.h"
 
+#include "core1_ipc.h"
+#include "core1_worker.h"
 #include "display.h"
 #include "fw_state.h"
 #include "sensor_setup.h"
@@ -32,6 +34,7 @@ struct travel_record travel_databuffer2[BUFFER_SIZE];
 static struct travel_record *active_travel_buffer = travel_databuffer1;
 static uint16_t travel_count = 0;
 static repeating_timer_t travel_timer;
+static ssd1306_t *recording_disp = NULL;
 
 #if HAS_GPS
 static struct gps_record gps_databuffer1[GPS_BUFFER_SIZE];
@@ -54,19 +57,33 @@ static void recording_error(ssd1306_t *disp, const char *message) {
     while (true) { tight_loop_contents(); }
 }
 
+static void storage_push_command(enum storage_session_command command) {
+    multicore_fifo_push_blocking(CORE1_FIFO_WORD(CORE1_FIFO_FAMILY_STORAGE_CMD, command));
+}
+
+static void storage_expect_event(enum storage_session_event expected_event) {
+    uint32_t event_word = multicore_fifo_pop_blocking();
+    if (!core1_fifo_is_family(event_word, CORE1_FIFO_FAMILY_STORAGE_EVENT) ||
+        CORE1_FIFO_ID(event_word) != (uint32_t)expected_event) {
+        recording_error(recording_disp, "STO IPC ERR");
+    }
+}
+
 // Hand the filled buffer to core 1 and receive the now-free alternate buffer back for subsequent samples.
 static void dump_active_travel_buffer(uint16_t size) {
-    multicore_fifo_push_blocking(DUMP_TRAVEL);
+    storage_push_command(STORAGE_CMD_DUMP_TRAVEL);
     multicore_fifo_push_blocking(size);
     multicore_fifo_push_blocking((uintptr_t)active_travel_buffer);
+    storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED);
     active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
 }
 
 #if HAS_GPS
 static void dump_gps_active_buffer(uint16_t size) {
-    multicore_fifo_push_blocking(DUMP_GPS);
+    storage_push_command(STORAGE_CMD_DUMP_GPS);
     multicore_fifo_push_blocking(size);
     multicore_fifo_push_blocking((uintptr_t)gps_active_buffer);
+    storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED);
     gps_active_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
 }
 
@@ -121,9 +138,10 @@ void recording_stop_gps_timer(void) { cancel_repeating_timer(&gps_timer); }
 
 #if HAS_IMU
 static void dump_active_imu_buffer(uint16_t size) {
-    multicore_fifo_push_blocking(DUMP_IMU);
+    storage_push_command(STORAGE_CMD_DUMP_IMU);
     multicore_fifo_push_blocking(size);
     multicore_fifo_push_blocking((uintptr_t)active_imu_buffer);
+    storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED);
     active_imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
 }
 
@@ -196,7 +214,7 @@ static bool travel_cb(repeating_timer_t *rt) {
         imu_count = 0;
 #endif
 
-        multicore_fifo_push_blocking(MARKER);
+        storage_push_command(STORAGE_CMD_MARKER);
         marker_pending = false;
     }
 
@@ -217,16 +235,27 @@ void recording_reset_buffers(void) {
     imu_count = 0;
 #endif
 
-    multicore_fifo_drain();
 }
 
 // OPEN reserves the next SST file on core 1 and returns the inactive buffers that this core can start filling.
 void recording_start(ssd1306_t *disp) {
+    int32_t backend_status = 0;
     char msg[16];
+
+    recording_disp = disp;
     sprintf(msg, "REC:%s|%s", fork_sensor.available ? "F" : ".", shock_sensor.available ? "S" : ".");
     display_message(disp, msg);
 
-    multicore_fifo_push_blocking(OPEN);
+    if (!core1_request_mode(CORE1_MODE_STORAGE)) {
+        recording_error(disp, "STO BUSY");
+    }
+
+    if (!core1_wait_for_event(CORE1_DISPATCH_EVENT_STORAGE_READY, &backend_status)) {
+        recording_error(disp, "STO IPC ERR");
+    }
+
+    storage_push_command(STORAGE_CMD_OPEN);
+    storage_expect_event(STORAGE_EVENT_OPEN_RESULT);
     int index = (int)multicore_fifo_pop_blocking();
     if (index < 0) {
         LOG("REC", "Failed to open data file\n");
@@ -262,6 +291,8 @@ void recording_start(ssd1306_t *disp) {
 }
 
 void recording_stop(void) {
+    int32_t backend_status = 0;
+
     cancel_repeating_timer(&travel_timer);
     if (travel_count > 0) {
         dump_active_travel_buffer(travel_count);
@@ -289,5 +320,11 @@ void recording_stop(void) {
 #endif
 
     // FINISH only closes the file, so all remaining sensor chunks must already have been flushed.
-    multicore_fifo_push_blocking(FINISH);
+    storage_push_command(STORAGE_CMD_FINISH);
+
+    if (!core1_wait_for_event(CORE1_DISPATCH_EVENT_BACKEND_COMPLETE, &backend_status) || backend_status < 0) {
+        recording_error(recording_disp, "FILE ERR");
+    }
+
+    recording_disp = NULL;
 }

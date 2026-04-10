@@ -34,6 +34,7 @@ pico_sdk_init()
 
 add_executable(sufni-suspension-telemetry
     src/fw/main.c
+    src/fw/core1_worker.c
     src/fw/fw_init.c
     src/fw/data_acquisition.c
     src/fw/data_sync.c

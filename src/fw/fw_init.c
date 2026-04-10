@@ -5,6 +5,7 @@
 #endif
 
 #include "data_acquisition.h"
+#include "core1_worker.h"
 #include "data_storage.h"
 #include "display.h"
 #include "helpers.h"
@@ -105,7 +106,7 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
     sleep_ms(1);
 
     LOG("DS3231", "Reading datetime\n");
-    if (!ds3231_get_datetime(&rtc, &tm_now)) {
+    if (!ds3231_get_datetime(rtc, &tm_now)) {
         LOG("DS3231", "RTC not connected, defaulting to 2000-01-01 00:00\n");
         tm_now = (struct tm){.tm_year = 100, .tm_mon = 0, .tm_mday = 1};
     }
@@ -203,7 +204,7 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
     }
 #endif
 
-    multicore_launch_core1(&sd_writer_main);
+    multicore_launch_core1(&core1_worker_main);
     init_runtime(disp);
 
     // Sleep/wake restores these registers after deep sleep, so capture the post-init baseline once here.

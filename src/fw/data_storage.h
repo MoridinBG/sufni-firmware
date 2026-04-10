@@ -2,6 +2,6 @@
 #define DATA_STORAGE_H
 
 int setup_storage(void);
-void sd_writer_main(void);
+int storage_session_run(void);
 
 #endif // DATA_STORAGE_H

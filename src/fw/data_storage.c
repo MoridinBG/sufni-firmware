@@ -1,6 +1,8 @@
 #include "data_storage.h"
 #include "data_acquisition.h"
 
+#include "core1_ipc.h"
+
 #include "sensor_setup.h"
 #include "sst.h"
 
@@ -16,6 +18,10 @@
 #include <stdio.h>
 
 static FIL recording;
+
+static void storage_send_event(enum storage_session_event event_id) {
+    multicore_fifo_push_blocking(CORE1_FIFO_WORD(CORE1_FIFO_FAMILY_STORAGE_EVENT, event_id));
+}
 
 int setup_storage(void) {
     static FATFS fs;
@@ -160,9 +166,9 @@ static void write_imu_chunk(uint16_t size, struct imu_record *buffer) {
 }
 #endif
 
-void sd_writer_main(void) {
+int storage_session_run(void) {
     int index;
-    enum command cmd;
+    uint32_t command_word;
     uint16_t size;
     struct travel_record *travel_buffer;
 #if HAS_GPS
@@ -174,11 +180,15 @@ void sd_writer_main(void) {
     struct chunk_header ch;
 
     while (true) {
-        cmd = (enum command)multicore_fifo_pop_blocking();
-        switch (cmd) {
-            case OPEN:
-                multicore_fifo_drain();
+        command_word = multicore_fifo_pop_blocking();
+        if (!core1_fifo_is_family(command_word, CORE1_FIFO_FAMILY_STORAGE_CMD)) {
+            return PICO_ERROR_GENERIC;
+        }
+
+        switch (CORE1_FIFO_ID(command_word)) {
+            case STORAGE_CMD_OPEN:
                 index = open_datafile();
+                storage_send_event(STORAGE_EVENT_OPEN_RESULT);
                 multicore_fifo_push_blocking(index);
                 multicore_fifo_push_blocking((uintptr_t)travel_databuffer2);
 #if HAS_IMU
@@ -188,37 +198,41 @@ void sd_writer_main(void) {
                 multicore_fifo_push_blocking((uintptr_t)gps_databuffer2);
 #endif
                 break;
-            case DUMP_TRAVEL:
+            case STORAGE_CMD_DUMP_TRAVEL:
                 size = (uint16_t)multicore_fifo_pop_blocking();
                 travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
                 multicore_fifo_push_blocking((uintptr_t)travel_buffer);
                 write_travel_chunk(size, travel_buffer);
                 break;
 #if HAS_GPS
-            case DUMP_GPS:
+            case STORAGE_CMD_DUMP_GPS:
                 size = (uint16_t)multicore_fifo_pop_blocking();
                 gps_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
                 multicore_fifo_push_blocking((uintptr_t)gps_buffer);
                 write_gps_chunk(size, gps_buffer);
                 break;
 #endif
 #if HAS_IMU
-            case DUMP_IMU:
+            case STORAGE_CMD_DUMP_IMU:
                 size = (uint16_t)multicore_fifo_pop_blocking();
                 imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
                 multicore_fifo_push_blocking((uintptr_t)imu_buffer);
                 write_imu_chunk(size, imu_buffer);
                 break;
 #endif
-            case MARKER:
+            case STORAGE_CMD_MARKER:
                 ch.type = CHUNK_TYPE_MARKER;
                 ch.length = 0;
                 f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
                 f_sync(&recording);
                 break;
-            case FINISH:
-                f_close(&recording);
-                break;
+            case STORAGE_CMD_FINISH:
+                return f_close(&recording) == FR_OK ? 0 : PICO_ERROR_GENERIC;
+            default:
+                return PICO_ERROR_GENERIC;
         }
     }
 }
