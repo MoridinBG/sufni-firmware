@@ -1,5 +1,7 @@
 #include "tcpserver.h"
 #include "ff.h"
+#include "live_protocol.h"
+#include "live_stream_core1.h"
 #include "lwip/apps/mdns.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
@@ -7,6 +9,7 @@
 #include "pico/time.h"
 #include "pico/unique_id.h"
 #include <stdio.h>
+#include <string.h>
 
 #include "../util/list.h"
 #include "../util/log.h"
@@ -25,10 +28,50 @@
 
 static pico_unique_board_id_t board_id;
 
+static err_t tcp_server_result(void *arg, int status);
+
+static void tcpserver_consume_rx(struct tcpserver *server, uint16_t bytes_to_consume) {
+    if (bytes_to_consume >= server->rx_len) {
+        server->rx_len = 0;
+        return;
+    }
+
+    memmove(server->rx_buffer, server->rx_buffer + bytes_to_consume, server->rx_len - bytes_to_consume);
+    server->rx_len -= bytes_to_consume;
+}
+
+static bool tcpserver_process_legacy_rx(struct tcpserver *server) {
+    while (server->rx_len >= sizeof(int)) {
+        int status;
+
+        memcpy(&status, server->rx_buffer, sizeof(int));
+        if (status == STATUS_FILE_REQUESTED) {
+            int id;
+            if (server->rx_len < (2 * sizeof(int))) {
+                return true;
+            }
+
+            memcpy(&id, server->rx_buffer + sizeof(int), sizeof(int));
+            server->requested_file = id;
+            server->status = status;
+            tcpserver_consume_rx(server, 2 * sizeof(int));
+            continue;
+        }
+
+        tcpserver_consume_rx(server, sizeof(int));
+        if (status < 0 || status == STATUS_FINISHED || status == STATUS_FILE_RECEIVED) {
+            tcp_server_result(server, status);
+            return true;
+        }
+
+        server->status = status;
+    }
+
+    return true;
+}
+
 // ----------------------------------------------------------------------------
 // TCP callback functions
-
-static err_t tcp_server_result(void *arg, int status);
 
 static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
     struct tcpserver *server = (struct tcpserver *)arg;
@@ -45,23 +88,30 @@ err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err
 
     cyw43_arch_lwip_check();
     if (p->tot_len > 0) {
-        int s;
-        pbuf_copy_partial(p, &s, 4, 0);
         tcp_recved(tpcb, p->tot_len);
 
-        if (s < 0 || s == STATUS_FINISHED) {
-            // close the server
-            tcp_server_result(arg, s);
-        } else if (s == STATUS_FILE_RECEIVED) {
-            // close the client connection
-            tcp_server_result(arg, s);
-        } else if (s == STATUS_FILE_REQUESTED) {
-            int id;
-            pbuf_copy_partial(p, &id, 4, 4);
-            server->requested_file = id;
-            server->status = s;
+        if ((server->rx_len + p->tot_len) > TCPSERVER_RX_BUFFER_SIZE) {
+            tcp_server_result(arg, -1);
         } else {
-            server->status = s;
+            pbuf_copy_partial(p, server->rx_buffer + server->rx_len, p->tot_len, 0);
+            server->rx_len += p->tot_len;
+
+            if (server->protocol_mode == TCPSERVER_PROTOCOL_UNKNOWN && server->rx_len >= sizeof(uint32_t)) {
+                uint32_t magic;
+                memcpy(&magic, server->rx_buffer, sizeof(magic));
+                server->protocol_mode =
+                    magic == LIVE_PROTOCOL_MAGIC ? TCPSERVER_PROTOCOL_LIVE : TCPSERVER_PROTOCOL_LEGACY;
+            }
+
+            if (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE) {
+                if (!live_stream_core1_process_rx(server)) {
+                    tcp_server_result(arg, -1);
+                }
+            } else if (server->protocol_mode == TCPSERVER_PROTOCOL_LEGACY) {
+                if (!tcpserver_process_legacy_rx(server)) {
+                    tcp_server_result(arg, -1);
+                }
+            }
         }
     }
     pbuf_free(p);
@@ -92,6 +142,8 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err)
     tcp_recv(client_pcb, tcp_server_recv);
     tcp_poll(client_pcb, tcp_server_poll, POLL_TIME_S * 2);
     tcp_err(client_pcb, tcp_server_err);
+
+    live_stream_core1_reset(server);
 
     server->status = STATUS_CLIENT_CONNECTED;
     return ERR_OK;
@@ -449,8 +501,15 @@ static void mdns_srv_txt(struct mdns_service *service, void *txt_userdata) {
 bool tcpserver_init(struct tcpserver *server) {
     pico_get_unique_board_id(&board_id);
 
-    
-  ("TCP", "Initializing server\n");
+    LOG("TCP", "Initializing server\n");
+    server->status = 0;
+    server->requested_file = 0;
+    server->data_len = 0;
+    server->sent_len = 0;
+    server->client_pcb = NULL;
+    server->server_pcb = NULL;
+    live_stream_core1_reset(server);
+
     if (server->mdns_initialized) {
         mdns_resp_restart(netif_default);
     } else {
@@ -468,23 +527,38 @@ bool tcpserver_init(struct tcpserver *server) {
         return false;
     }
 
-    LOG("TCP", "Server listening on port %d, IP: %s\n", 
-        TCP_PORT, ip4addr_ntoa(netif_ip4_addr(netif_default)));
+    LOG("TCP", "Server listening on port %d, IP: %s\n", TCP_PORT, ip4addr_ntoa(netif_ip4_addr(netif_default)));
     server->status = STATUS_INITIALIZED;
 
     return true;
 }
 
-bool tcpserver_serve(struct tcpserver *server) {
+bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
     LOG("TCP", "Server started, waiting for requests\n");
     while (server->status != STATUS_FINISHED) {
+        if (stop_requested != NULL && *stop_requested) {
+            tcpserver_finish(server);
+            continue;
+        }
+
         if (server->status == STATUS_FILE_REQUESTED) {
-            tcpserver_process(server);
+            if (!tcpserver_process(server)) {
+                LOG("TCP", "Request processing failed\n");
+                server->status = STATUS_INITIALIZED;
+            }
+        } else if (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE || server->live_session_active ||
+                   server->live_start_pending || server->live_stop_pending) {
+            live_stream_core1_service(server);
+        } else if (server->status < 0) {
+            live_stream_core1_abort(server);
+            LOG("TCP", "Client/session error: %d\n", server->status);
+            server->status = STATUS_INITIALIZED;
         }
         sleep_ms(1);
     }
     LOG("TCP", "Server stopping\n");
     tcpserver_teardown(server);
+    return true;
 }
 
 void inline tcpserver_finish(struct tcpserver *server) {

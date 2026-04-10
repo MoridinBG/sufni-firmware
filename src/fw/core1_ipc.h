@@ -30,8 +30,9 @@ enum core1_dispatch_command {
 
 enum core1_dispatch_event {
     CORE1_DISPATCH_EVENT_STORAGE_READY = 1,
-    CORE1_DISPATCH_EVENT_BACKEND_COMPLETE = 2,
-    CORE1_DISPATCH_EVENT_BACKEND_ERROR = 3,
+    CORE1_DISPATCH_EVENT_TCP_SERVER_READY = 2,
+    CORE1_DISPATCH_EVENT_BACKEND_COMPLETE = 3,
+    CORE1_DISPATCH_EVENT_BACKEND_ERROR = 4,
 };
 
 enum storage_session_command {
@@ -48,8 +49,6 @@ enum storage_session_event {
     STORAGE_EVENT_BUFFER_RETURNED = 2,
 };
 
-static inline bool core1_fifo_is_family(uint32_t word, uint32_t family) {
-    return CORE1_FIFO_FAMILY(word) == family;
-}
+static inline bool core1_fifo_is_family(uint32_t word, uint32_t family) { return CORE1_FIFO_FAMILY(word) == family; }
 
 #endif // CORE1_IPC_H

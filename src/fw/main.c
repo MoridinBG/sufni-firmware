@@ -22,7 +22,6 @@
 // For scb_hw so we can enable deep sleep
 #include "hardware/structs/scb.h"
 
-#include "../net/tcpserver.h"
 #include "../ntp//ntp.h"
 #include "../rtc//ds3231.h"
 #include "../sensor/travel/travel_sensor.h"
@@ -31,6 +30,7 @@
 #include "../util/list.h"
 #include "../util/log.h"
 #include "calibration_flow.h"
+#include "core1_worker.h"
 #include "data_acquisition.h"
 #include "data_storage.h"
 #include "data_sync.h"
@@ -38,6 +38,7 @@
 #include "fw_init.h"
 #include "fw_state.h"
 #include "helpers.h"
+#include "live_stream_core0.h"
 #include "sensor_setup.h"
 #include "sst.h"
 #include "state_views.h"
@@ -58,7 +59,7 @@ volatile float gps_last_epe = 0.0f;
 static struct fw_power_state power_state;
 
 static ssd1306_t disp;
-static struct tcpserver server;
+static volatile bool serve_tcp_stop_requested = false;
 
 struct ds3231 rtc;
 
@@ -247,14 +248,63 @@ static void on_disabled_gps() { tight_loop_contents(); }
 static void on_rec() { tight_loop_contents(); }
 
 static void on_serve_tcp() {
+    enum core1_dispatch_event event_id;
+    int32_t event_data = 0;
+
+    serve_tcp_stop_requested = false;
     display_message(&disp, "CONNECT");
     if (!wifi_connect(true)) {
         display_message(&disp, "CONN ERR");
         sleep_ms(1000);
-    } else if (tcpserver_init(&server)) {
-        display_message(&disp, "SERVER ON");
-        tcpserver_serve(&server);
+        wifi_disconnect();
+        state = IDLE;
+        return;
     }
+
+    if (!core1_request_mode(CORE1_MODE_TCP_SERVER)) {
+        display_message(&disp, "SRV BUSY");
+        sleep_ms(1000);
+        wifi_disconnect();
+        state = IDLE;
+        return;
+    }
+
+    if (!core1_wait_next_event(&event_id, &event_data)) {
+        display_message(&disp, "SRV IPC");
+        sleep_ms(1000);
+        wifi_disconnect();
+        state = IDLE;
+        return;
+    }
+
+    if (event_id != CORE1_DISPATCH_EVENT_TCP_SERVER_READY) {
+        display_message(&disp, "SRV ERR");
+        sleep_ms(1000);
+        wifi_disconnect();
+        state = IDLE;
+        return;
+    }
+
+    display_message(&disp, "SERVER ON");
+    while (state == SERVE_TCP) {
+        live_stream_core0_service();
+
+        if (serve_tcp_stop_requested) {
+            live_stream_core0_stop();
+            core1_request_stop();
+            serve_tcp_stop_requested = false;
+        }
+
+        if (core1_poll_event(&event_id, &event_data)) {
+            if (event_id == CORE1_DISPATCH_EVENT_BACKEND_COMPLETE || event_id == CORE1_DISPATCH_EVENT_BACKEND_ERROR) {
+                break;
+            }
+        }
+
+        tight_loop_contents();
+        sleep_ms(1);
+    }
+
     wifi_disconnect();
     state = IDLE;
 }
@@ -321,8 +371,7 @@ static void on_right_press(void *user_data) {
             LOG("REC", "Marker set\n");
             break;
         case SERVE_TCP:
-            tcpserver_finish(&server);
-            state = IDLE;
+            serve_tcp_stop_requested = true;
             break;
         default:
             break;

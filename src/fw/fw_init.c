@@ -4,11 +4,12 @@
 #include "bsp/board.h"
 #endif
 
-#include "data_acquisition.h"
 #include "core1_worker.h"
+#include "data_acquisition.h"
 #include "data_storage.h"
 #include "display.h"
 #include "helpers.h"
+#include "live_stream_core0.h"
 #include "sensor_setup.h"
 
 #include "../ntp/ntp.h"
@@ -58,7 +59,7 @@ static void init_travel_sensors(void) {
 
 #if HAS_GPS
 static void init_gps_sensor(void) {
-    gps.on_fix = recording_on_gps_fix;
+    gps.on_fix = gps_fix_router_on_fix;
     if (gps_sensor_init(&gps)) {
         LOG("INIT", "GPS initialized\n");
         if (!gps_sensor_configure(&gps, 1000 / GPS_SAMPLE_RATE, true, true, true, true, false)) {
