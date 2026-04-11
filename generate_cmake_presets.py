@@ -101,7 +101,7 @@ def generate():
         {"name": "OFF", "display_name": "Off"},
         {"name": "ON", "display_name": "On"}
     ]
-    log_to_file = get_choice("Log to file:", log_to_file_options, 0)  # Default Off
+    log_to_file = get_choice("Log to file:", log_to_file_options, 1)  # Default On
 
     # Construct the cache variables
     cache_variables = {

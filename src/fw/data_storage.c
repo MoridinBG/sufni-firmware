@@ -132,6 +132,7 @@ static int open_datafile(void) {
     }
 #endif
 
+    f_sync(&recording);
     return index;
 }
 
