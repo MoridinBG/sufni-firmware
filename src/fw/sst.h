@@ -88,4 +88,14 @@ struct imu_record {
 #define FILENAME_LENGTH                                                                                                \
     10 // filename is always in 00000.SST format,
        // so length is always 10.
+
+// Metadata extracted from an SST file
+struct sst_file_info {
+    time_t timestamp;
+    uint32_t duration_ms;
+    uint8_t version;
+};
+
+struct sst_file_info sst_get_file_info(const char *path);
+
 #endif /* _SST_H */

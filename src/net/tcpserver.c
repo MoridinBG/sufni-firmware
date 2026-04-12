@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../fw/sst.h"
 #include "../util/list.h"
 #include "../util/log.h"
 
@@ -331,32 +332,6 @@ static FSIZE_t get_size(const char *path) {
     return finfo.fsize;
 }
 
-static time_t get_timestamp(const char *path) {
-    FRESULT fr;
-    FIL f;
-
-    fr = f_open(&f, path, FA_OPEN_EXISTING | FA_READ);
-    if (!(fr == FR_OK || fr == FR_EXIST)) {
-        return 0;
-    }
-
-    fr = f_lseek(&f, 8);
-    if (fr != FR_OK) {
-        return 0;
-    }
-
-    time_t timestamp;
-    uint br;
-    fr = f_read(&f, &timestamp, 8, &br);
-    if (fr != FR_OK || br != 8) {
-        return 0;
-    }
-
-    f_close(&f);
-
-    return timestamp;
-}
-
 static bool process_dirinfo_request(struct tcpserver *server) {
     server->sent_len = 0;
 
@@ -376,7 +351,8 @@ static bool process_dirinfo_request(struct tcpserver *server) {
     f_closedir(&dj);
 
     // calculate total size
-    static FSIZE_t file_data_size = ((FILENAME_LENGTH - 1) + sizeof(FSIZE_t) + sizeof(time_t));
+    static FSIZE_t file_data_size =
+        (FILENAME_LENGTH - 1) + sizeof(FSIZE_t) + sizeof(time_t) + sizeof(uint32_t) + sizeof(uint8_t);
     FSIZE_t dirinfo_size = PICO_UNIQUE_BOARD_ID_SIZE_BYTES + // board identifier
                            sizeof(uint16_t) +                // sample rate
                            all * file_data_size;             // file info (name, size, timestamp) for all SSTs
@@ -409,15 +385,18 @@ static bool process_dirinfo_request(struct tcpserver *server) {
     struct node *n = to_import->head;
     bool needs_retry = false;
     while (n != NULL) {
-        static char record[25];
+        static char record[30];
         if (!needs_retry) {
             // These will be dummy values if reading them fails, so that the combined size
             // we sent earlier would be correct.
             FSIZE_t size = get_size(n->data);
-            time_t timestamp = get_timestamp(n->data);
-            memcpy(record, n->data, FILENAME_LENGTH - 1);
-            memcpy(record + FILENAME_LENGTH - 1, &size, sizeof(FSIZE_t));
-            memcpy(record + FILENAME_LENGTH - 1 + sizeof(FSIZE_t), &timestamp, sizeof(time_t));
+            struct sst_file_info info = sst_get_file_info(n->data);
+            int off = 0;
+            memcpy(record + off, n->data, FILENAME_LENGTH - 1);          off += FILENAME_LENGTH - 1;
+            memcpy(record + off, &size, sizeof(FSIZE_t));                 off += sizeof(FSIZE_t);
+            memcpy(record + off, &info.timestamp, sizeof(time_t));        off += sizeof(time_t);
+            memcpy(record + off, &info.duration_ms, sizeof(uint32_t));    off += sizeof(uint32_t);
+            memcpy(record + off, &info.version, sizeof(uint8_t));
         }
 
         cyw43_arch_lwip_begin();

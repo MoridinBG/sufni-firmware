@@ -8,6 +8,7 @@
 #include "../ntp/ntp.h"
 #include "../sensor/imu/imu_sensor.h"
 #include "../sensor/travel/travel_sensor.h"
+#include "../util/log.h"
 
 #include "hardware/timer.h"
 #include "pico/time.h"
@@ -105,8 +106,6 @@ static void live_publish_slot(struct live_slot_header *header, enum live_stream_
         return;
     }
 
-    header->queue_depth_after_publish = live_stream_shared_ready_depth(stream_type) + 1;
-    header->dropped_batches = stats->dropped_batches;
     live_stream_publish_slot(&header->state);
     stats->queue_depth = live_stream_shared_ready_depth(stream_type);
 }
@@ -263,18 +262,22 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
     memset(resp, 0, sizeof(*resp));
 
     if (live_runtime.active) {
+        LOG("LIVE", "Start rejected: already active\n");
         resp->result = LIVE_START_RESULT_BUSY;
         return false;
     }
 
     requested_mask = req->sensor_mask;
     if (requested_mask == 0 || req->protocol_version != LIVE_PROTOCOL_VERSION) {
+        LOG("LIVE", "Start rejected: invalid request (mask=0x%02x, ver=%u)\n", requested_mask,
+            (unsigned)req->protocol_version);
         resp->result = LIVE_START_RESULT_INVALID_REQUEST;
         return false;
     }
 
     if ((requested_mask & (LIVE_SENSOR_MASK_TRAVEL | LIVE_SENSOR_MASK_IMU)) != 0u &&
         !calibration_refresh_active_sensors()) {
+        LOG("LIVE", "Start failed: calibration refresh failed\n");
         resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
         return false;
     }
@@ -293,6 +296,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
 
     if ((requested_mask & LIVE_SENSOR_MASK_TRAVEL) != 0u) {
         if (!fork_sensor.available && !shock_sensor.available) {
+            LOG("LIVE", "Start failed: no travel sensors available\n");
             resp->result = LIVE_START_RESULT_UNAVAILABLE;
             return false;
         }
@@ -321,6 +325,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         }
 
         if (resp->active_imu_count == 0u) {
+            LOG("LIVE", "Start failed: no IMU sensors available\n");
             resp->result = LIVE_START_RESULT_UNAVAILABLE;
             return false;
         }
@@ -338,12 +343,13 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
 #if HAS_GPS
     if ((requested_mask & LIVE_SENSOR_MASK_GPS) != 0u) {
         if (!gps.available) {
+            LOG("LIVE", "Start failed: GPS not available\n");
             resp->result = LIVE_START_RESULT_UNAVAILABLE;
             return false;
         }
 
         resp->accepted_gps_fix_hz =
-            live_requested_rate_or_default(req->requested_gps_fix_hz, GPS_SAMPLE_RATE, LIVE_MAX_GPS_FIX_HZ);
+            live_requested_rate_or_default(req->requested_gps_fix_hz, 1, LIVE_MAX_GPS_FIX_HZ);
         resp->gps_fix_interval_ms = 1000u / resp->accepted_gps_fix_hz;
         if (resp->gps_fix_interval_ms == 0u) {
             resp->gps_fix_interval_ms = 1u;
@@ -351,17 +357,21 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         resp->accepted_gps_fix_hz = 1000u / resp->gps_fix_interval_ms;
 
         if (!gps.power_on(&gps)) {
+            LOG("LIVE", "Start failed: GPS power_on failed\n");
             resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
             return false;
         }
 
         if (!gps_sensor_configure(&gps, (uint16_t)resp->gps_fix_interval_ms, true, true, true, true, false)) {
+            LOG("LIVE", "Start failed: GPS configure failed (interval=%u ms)\n",
+                (unsigned)resp->gps_fix_interval_ms);
             gps.power_off(&gps);
             resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
             return false;
         }
 
         if (!add_repeating_timer_us(LIVE_GPS_RX_DRAIN_INTERVAL_US, live_gps_timer_cb, NULL, &live_runtime.gps_timer)) {
+            LOG("LIVE", "Start failed: GPS RX drain timer failed\n");
             gps.power_off(&gps);
             resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
             return false;
@@ -374,6 +384,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
 #endif
 
     if (resp->selected_sensor_mask == 0u) {
+        LOG("LIVE", "Start failed: no sensors selected\n");
         resp->result = LIVE_START_RESULT_INVALID_REQUEST;
         return false;
     }
@@ -381,6 +392,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
     if ((resp->selected_sensor_mask & LIVE_SENSOR_MASK_TRAVEL) != 0u &&
         !add_repeating_timer_us(-(int64_t)live_runtime.travel_period_us, live_travel_cb, NULL,
                                 &live_runtime.travel_timer)) {
+        LOG("LIVE", "Start failed: travel timer failed (period=%u us)\n", (unsigned)live_runtime.travel_period_us);
         live_stream_core0_stop();
         resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
         return false;
@@ -392,6 +404,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
 #if HAS_IMU
     if ((resp->selected_sensor_mask & LIVE_SENSOR_MASK_IMU) != 0u &&
         !add_repeating_timer_us(-(int64_t)live_runtime.imu_period_us, live_imu_cb, NULL, &live_runtime.imu_timer)) {
+        LOG("LIVE", "Start failed: IMU timer failed (period=%u us)\n", (unsigned)live_runtime.imu_period_us);
         live_stream_core0_stop();
         resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
         return false;

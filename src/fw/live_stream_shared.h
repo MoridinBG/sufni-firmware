@@ -91,8 +91,6 @@ struct live_slot_header {
     uint64_t first_monotonic_us;
     uint32_t sample_count;
     uint32_t payload_bytes;
-    uint32_t queue_depth_after_publish;
-    uint32_t dropped_batches;
 };
 
 struct live_travel_slot {
