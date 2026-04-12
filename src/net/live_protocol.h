@@ -17,11 +17,13 @@ enum live_frame_type {
     LIVE_FRAME_START_LIVE = 1,
     LIVE_FRAME_STOP_LIVE = 2,
     LIVE_FRAME_PING = 3,
+    LIVE_FRAME_IDENTIFY = 4,
     LIVE_FRAME_START_LIVE_ACK = 16,
     LIVE_FRAME_STOP_LIVE_ACK = 17,
     LIVE_FRAME_ERROR = 18,
     LIVE_FRAME_PONG = 19,
     LIVE_FRAME_SESSION_HEADER = 20,
+    LIVE_FRAME_IDENTIFY_ACK = 21,
     LIVE_FRAME_TRAVEL_BATCH = 32,
     LIVE_FRAME_IMU_BATCH = 33,
     LIVE_FRAME_GPS_BATCH = 34,
@@ -76,6 +78,10 @@ struct live_batch_payload {
     uint64_t first_index;
     uint64_t first_monotonic_us;
     uint32_t sample_count;
+} __attribute__((packed));
+
+struct live_identify_ack_frame {
+    uint8_t board_id[8];
 } __attribute__((packed));
 
 struct live_session_stats_frame {

@@ -10,6 +10,7 @@
 #include "lwip/tcp.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "pico/unique_id.h"
 
 #include <string.h>
 
@@ -360,6 +361,18 @@ static bool live_stream_core1_process_rx(struct tcpserver *server) {
             case LIVE_FRAME_STOP_LIVE:
                 live_queue_stop_request(server);
                 break;
+            case LIVE_FRAME_IDENTIFY: {
+                pico_unique_board_id_t board_id;
+                struct live_identify_ack_frame ack;
+                pico_get_unique_board_id(&board_id);
+                memcpy(ack.board_id, board_id.id, sizeof(ack.board_id));
+                if (!live_send_frame(server, LIVE_FRAME_IDENTIFY_ACK, &ack, sizeof(ack),
+                                     server->live.tx_sequence)) {
+                    return true;
+                }
+                server->live.tx_sequence++;
+                break;
+            }
             case LIVE_FRAME_PING:
                 if (!live_send_frame(server, LIVE_FRAME_PONG, NULL, 0, server->live.tx_sequence)) {
                     return true;
