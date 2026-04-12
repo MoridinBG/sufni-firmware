@@ -1,202 +1,79 @@
 #include "tcpserver.h"
-#include "ff.h"
-#include "live_protocol.h"
-#include "live_stream_core1.h"
+
 #include "lwip/apps/mdns.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
-#include "lwip/tcpbase.h"
-#include "pico/time.h"
-#include "pico/unique_id.h"
 #include "wifi.h"
+
 #include <stdio.h>
 #include <string.h>
 
-#include "../fw/sst.h"
-#include "../util/list.h"
+#include "../fw/management_shared.h"
 #include "../util/log.h"
 
-#define READ_BUF_LEN (10 * 1024)
-#define TCP_PORT     1557
-#define POLL_TIME_S  5
+#define TCP_PORT    1557
+#define POLL_TIME_S 5
 
-#define STATUS_INITIALIZED      1
-#define STATUS_CLIENT_CONNECTED 2
-#define STATUS_FILE_REQUESTED   3
-#define STATUS_HEADER_OK        4
-#define STATUS_FILE_RECEIVED    5
-#define STATUS_FINISHED         6
-#define STATUS_FILE_TRASHED     10
+struct tcpserver_protocol_registration {
+    enum tcpserver_protocol_mode mode;
+    const struct tcpserver_protocol_ops *ops;
+};
 
-static pico_unique_board_id_t board_id;
+static const struct tcpserver_protocol_registration tcpserver_protocols[] = {
+    {TCPSERVER_PROTOCOL_LIVE, &live_stream_core1_protocol_ops},
+    {TCPSERVER_PROTOCOL_MANAGEMENT, &management_protocol_ops},
+};
 
-static err_t tcp_server_result(void *arg, int status);
+static void mdns_srv_txt(struct mdns_service *service, void *txt_userdata) {
+    err_t res;
 
-static void tcpserver_consume_rx(struct tcpserver *server, uint16_t bytes_to_consume) {
-    if (bytes_to_consume >= server->rx_len) {
-        server->rx_len = 0;
-        return;
-    }
-
-    memmove(server->rx_buffer, server->rx_buffer + bytes_to_consume, server->rx_len - bytes_to_consume);
-    server->rx_len -= bytes_to_consume;
+    LWIP_UNUSED_ARG(txt_userdata);
+    res = mdns_resp_add_service_txtitem(service, NULL, 0);
+    LWIP_ERROR("mdns add service txt failed\n", (res == ERR_OK), return);
 }
 
-static bool tcpserver_process_legacy_rx(struct tcpserver *server) {
-    while (server->rx_len >= sizeof(int)) {
-        int status;
+static void tcpserver_reset_connection_state(struct tcpserver *server) {
+    server->client_connected = false;
+    server->close_client_requested = false;
+    server->protocol_mode = TCPSERVER_PROTOCOL_UNKNOWN;
+    server->protocol_ops = NULL;
+    server->rx_len = 0;
+    memset(server->rx_buffer, 0, sizeof(server->rx_buffer));
+    server->live = (struct live_protocol_session){0};
+    management_protocol_reset_session(server);
+}
 
-        memcpy(&status, server->rx_buffer, sizeof(int));
-        if (status == STATUS_FILE_REQUESTED) {
-            int id;
-            if (server->rx_len < (2 * sizeof(int))) {
-                return true;
-            }
+static bool tcpserver_can_accept_client(const struct tcpserver *server) {
+    size_t index;
 
-            memcpy(&id, server->rx_buffer + sizeof(int), sizeof(int));
-            server->requested_file = id;
-            server->status = status;
-            tcpserver_consume_rx(server, 2 * sizeof(int));
+    for (index = 0; index < (sizeof(tcpserver_protocols) / sizeof(tcpserver_protocols[0])); ++index) {
+        const struct tcpserver_protocol_registration *registration = &tcpserver_protocols[index];
+
+        if (registration->mode == TCPSERVER_PROTOCOL_LIVE && !server->options.allow_live_preview) {
             continue;
         }
-
-        tcpserver_consume_rx(server, sizeof(int));
-        if (status < 0 || status == STATUS_FINISHED || status == STATUS_FILE_RECEIVED) {
-            tcp_server_result(server, status);
-            return true;
+        if (!registration->ops->can_accept(server)) {
+            return false;
         }
-
-        server->status = status;
     }
 
     return true;
 }
 
-// ----------------------------------------------------------------------------
-// TCP callback functions
-
-static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
-    struct tcpserver *server = (struct tcpserver *)arg;
-    server->sent_len += len;
-
-    return ERR_OK;
-}
-
-err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
-    struct tcpserver *server = (struct tcpserver *)arg;
-    if (NULL == p) {
-        return tcp_server_result(arg, -1);
-    }
-
-    cyw43_arch_lwip_check();
-    if (p->tot_len > 0) {
-        tcp_recved(tpcb, p->tot_len);
-
-        if ((server->rx_len + p->tot_len) > TCPSERVER_RX_BUFFER_SIZE) {
-            tcp_server_result(arg, -1);
-        } else {
-            pbuf_copy_partial(p, server->rx_buffer + server->rx_len, p->tot_len, 0);
-            server->rx_len += p->tot_len;
-
-            if (server->protocol_mode == TCPSERVER_PROTOCOL_UNKNOWN && server->rx_len >= sizeof(uint32_t)) {
-                uint32_t magic;
-                memcpy(&magic, server->rx_buffer, sizeof(magic));
-                if (magic == LIVE_PROTOCOL_MAGIC) {
-                    if (!server->options.allow_live_preview) {
-                        tcp_server_result(arg, -1);
-                    } else {
-                        server->protocol_mode = TCPSERVER_PROTOCOL_LIVE;
-                    }
-                } else {
-                    server->protocol_mode = TCPSERVER_PROTOCOL_LEGACY;
-                }
-            }
-
-            if (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE) {
-                if (!live_stream_core1_process_rx(server)) {
-                    tcp_server_result(arg, -1);
-                }
-            } else if (server->protocol_mode == TCPSERVER_PROTOCOL_LEGACY) {
-                if (!tcpserver_process_legacy_rx(server)) {
-                    tcp_server_result(arg, -1);
-                }
-            }
-        }
-    }
-    pbuf_free(p);
-
-    return ERR_OK;
-}
-
-static err_t tcp_server_poll(void *arg, struct tcp_pcb *tpcb) { return ERR_OK; }
-
-static void tcp_server_err(void *arg, err_t err) {
-    if (err != ERR_ABRT) {
-        tcp_server_result(arg, err);
+static void tcpserver_clear_stale_management_response(void) {
+    if (management_shared_get_state() == MGMT_CORE_STATE_RESPONSE_READY) {
+        management_shared_complete_response();
     }
 }
 
-static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err) {
-    struct tcpserver *server = (struct tcpserver *)arg;
-    if (err != ERR_OK || client_pcb == NULL) {
-        LOG("TCP", "Client connection failed: %d\n", err);
-        tcp_server_result(arg, err);
-        return ERR_VAL;
-    }
-
-    if (!live_stream_core1_can_accept_client(server)) {
-        LOG("TCP", "Rejecting client while live teardown is pending\n");
-        tcp_abort(client_pcb);
-        return ERR_ABRT;
-    }
-
-    LOG("TCP", "Client connected\n");
-    server->client_pcb = client_pcb;
-    tcp_arg(client_pcb, server);
-    tcp_sent(client_pcb, tcp_server_sent);
-    tcp_recv(client_pcb, tcp_server_recv);
-    tcp_poll(client_pcb, tcp_server_poll, POLL_TIME_S * 2);
-    tcp_err(client_pcb, tcp_server_err);
-
-    live_stream_core1_reset(server);
-
-    server->status = STATUS_CLIENT_CONNECTED;
-    return ERR_OK;
-}
-
-// ----------------------------------------------------------------------------
-// TCP helper functions
-
-static bool tcp_server_open(void *arg) {
-    struct tcpserver *server = (struct tcpserver *)arg;
-    struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
-    if (!pcb) {
-        return false;
-    }
-
-    err_t err = tcp_bind(pcb, NULL, TCP_PORT);
-    if (err) {
-        return false;
-    }
-
-    server->server_pcb = tcp_listen_with_backlog(pcb, 1);
-    if (!server->server_pcb) {
-        if (pcb) {
-            tcp_close(pcb);
-        }
-        return false;
-    }
-
-    tcp_arg(server->server_pcb, server);
-    tcp_accept(server->server_pcb, tcp_server_accept);
-
-    return true;
-}
-
-static err_t tcp_server_close(void *arg) {
-    struct tcpserver *server = (struct tcpserver *)arg;
+static err_t tcpserver_close_client(struct tcpserver *server) {
     err_t err = ERR_OK;
+
     if (server->client_pcb != NULL) {
+        if (server->protocol_ops != NULL) {
+            server->protocol_ops->on_disconnect(server);
+        }
+
         tcp_arg(server->client_pcb, NULL);
         tcp_poll(server->client_pcb, NULL, 0);
         tcp_sent(server->client_pcb, NULL);
@@ -210,272 +87,190 @@ static err_t tcp_server_close(void *arg) {
         server->client_pcb = NULL;
     }
 
-    if (server->status == STATUS_FINISHED && server->server_pcb) {
+    tcpserver_reset_connection_state(server);
+    tcpserver_clear_stale_management_response();
+    return err;
+}
+
+static bool tcpserver_select_protocol(struct tcpserver *server) {
+    size_t index;
+
+    if (server->protocol_ops != NULL) {
+        return true;
+    }
+
+    for (index = 0; index < (sizeof(tcpserver_protocols) / sizeof(tcpserver_protocols[0])); ++index) {
+        const struct tcpserver_protocol_registration *registration = &tcpserver_protocols[index];
+
+        if (registration->mode == TCPSERVER_PROTOCOL_LIVE && !server->options.allow_live_preview) {
+            continue;
+        }
+        if (!registration->ops->detect(server)) {
+            continue;
+        }
+
+        server->protocol_mode = registration->mode;
+        server->protocol_ops = registration->ops;
+        server->protocol_ops->on_accept(server);
+        LOG("TCP", "Protocol selected: %s\n", registration->mode == TCPSERVER_PROTOCOL_LIVE ? "LIVE" : "MGMT");
+        return true;
+    }
+
+    if (server->rx_len >= sizeof(uint32_t)) {
+        LOG("TCP", "Rejecting unknown initial traffic\n");
+        server->last_error = PICO_ERROR_INVALID_DATA;
+        return false;
+    }
+
+    return true;
+}
+
+static bool tcpserver_process_client(struct tcpserver *server) {
+    if (!tcpserver_select_protocol(server)) {
+        return false;
+    }
+
+    if (server->protocol_ops == NULL) {
+        return true;
+    }
+
+    if (server->rx_len > 0u && !server->protocol_ops->process_rx(server)) {
+        return false;
+    }
+
+    if (server->protocol_ops->needs_service(server)) {
+        server->protocol_ops->service(server);
+    }
+
+    return !server->close_client_requested;
+}
+
+static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
+    LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(tpcb);
+    LWIP_UNUSED_ARG(len);
+    return ERR_OK;
+}
+
+static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    struct tcpserver *server = (struct tcpserver *)arg;
+
+    if (p == NULL) {
+        server->close_client_requested = true;
+        server->last_error = 0;
+        return ERR_OK;
+    }
+
+    cyw43_arch_lwip_check();
+    if (err != ERR_OK) {
+        server->close_client_requested = true;
+        server->last_error = err;
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    if (p->tot_len > 0u) {
+        tcp_recved(tpcb, p->tot_len);
+
+        if ((server->rx_len + p->tot_len) > TCPSERVER_RX_BUFFER_SIZE) {
+            server->close_client_requested = true;
+            server->last_error = PICO_ERROR_GENERIC;
+        } else {
+            pbuf_copy_partial(p, server->rx_buffer + server->rx_len, p->tot_len, 0);
+            server->rx_len += p->tot_len;
+        }
+    }
+
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static err_t tcp_server_poll(void *arg, struct tcp_pcb *tpcb) {
+    LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(tpcb);
+    return ERR_OK;
+}
+
+static void tcp_server_err(void *arg, err_t err) {
+    struct tcpserver *server = (struct tcpserver *)arg;
+
+    if (server == NULL) {
+        return;
+    }
+
+    if (server->protocol_ops != NULL) {
+        server->protocol_ops->on_disconnect(server);
+    }
+
+    server->client_pcb = NULL;
+    server->last_error = err == ERR_ABRT ? 0 : err;
+    tcpserver_reset_connection_state(server);
+    tcpserver_clear_stale_management_response();
+}
+
+static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err) {
+    struct tcpserver *server = (struct tcpserver *)arg;
+
+    if (err != ERR_OK || client_pcb == NULL) {
+        LOG("TCP", "Client connection failed: %d\n", err);
+        return ERR_VAL;
+    }
+
+    if (!tcpserver_can_accept_client(server)) {
+        LOG("TCP", "Rejecting client while protocol state is busy\n");
+        tcp_abort(client_pcb);
+        return ERR_ABRT;
+    }
+
+    LOG("TCP", "Client connected\n");
+    tcpserver_reset_connection_state(server);
+    server->client_pcb = client_pcb;
+    server->client_connected = true;
+
+    tcp_arg(client_pcb, server);
+    tcp_sent(client_pcb, tcp_server_sent);
+    tcp_recv(client_pcb, tcp_server_recv);
+    tcp_poll(client_pcb, tcp_server_poll, POLL_TIME_S * 2);
+    tcp_err(client_pcb, tcp_server_err);
+    return ERR_OK;
+}
+
+static bool tcp_server_open(struct tcpserver *server) {
+    struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
+    err_t err;
+
+    if (pcb == NULL) {
+        return false;
+    }
+
+    err = tcp_bind(pcb, NULL, TCP_PORT);
+    if (err != ERR_OK) {
+        tcp_close(pcb);
+        return false;
+    }
+
+    server->server_pcb = tcp_listen_with_backlog(pcb, 1);
+    if (server->server_pcb == NULL) {
+        tcp_close(pcb);
+        return false;
+    }
+
+    tcp_arg(server->server_pcb, server);
+    tcp_accept(server->server_pcb, tcp_server_accept);
+    return true;
+}
+
+static void tcpserver_teardown(struct tcpserver *server) {
+    if (server->client_pcb != NULL) {
+        tcpserver_close_client(server);
+    }
+
+    if (server->server_pcb != NULL) {
         tcp_arg(server->server_pcb, NULL);
         tcp_close(server->server_pcb);
         server->server_pcb = NULL;
     }
 
-    return err;
-}
-
-static err_t tcp_server_result(void *arg, int status) {
-    struct tcpserver *server = (struct tcpserver *)arg;
-    server->status = status;
-    return tcp_server_close(arg);
-}
-
-// ----------------------------------------------------------------------------
-// SST file handler
-
-static bool process_sst_file_request(struct tcpserver *server) {
-    server->sent_len = 0;
-
-    // get size of requested file
-    char filename[10];
-    sprintf(filename, "%05d.SST", server->requested_file);
-    FILINFO finfo;
-    FRESULT fr = f_stat(filename, &finfo);
-    if (fr != FR_OK) {
-        return false;
-    }
-
-    // calculate total size
-    server->data_len = sizeof(FSIZE_t) + finfo.fsize;
-
-    // send size
-    cyw43_arch_lwip_begin();
-    tcp_write(server->client_pcb, &finfo.fsize, sizeof(FSIZE_t), TCP_WRITE_FLAG_COPY);
-    tcp_output(server->client_pcb);
-    cyw43_arch_lwip_end();
-
-    // wait for client to accept and validate size
-    while (server->status != STATUS_HEADER_OK) {
-        if (server->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
-    }
-
-    // open the file for reading
-    FIL f;
-    fr = f_open(&f, filename, FA_OPEN_EXISTING | FA_READ);
-    if (!(fr == FR_OK || fr == FR_EXIST)) {
-        return false;
-    }
-
-    // send the file
-    static uint8_t buffer[READ_BUF_LEN];
-    uint br = READ_BUF_LEN;
-    FSIZE_t total_read = 0;
-    bool needs_retry = false;
-
-    while (true) {
-        // Determine how many bytes to send in this turn. This should be the
-        // minimum of the available send buffer size and the maximum read
-        // length.
-        cyw43_arch_lwip_begin();
-        u16_t to_read = tcp_sndbuf(server->client_pcb);
-        cyw43_arch_lwip_end();
-        if (to_read > READ_BUF_LEN) {
-            to_read = READ_BUF_LEN;
-        }
-
-        // Read data from the SST file.
-        if (!needs_retry) {
-            fr = f_read(&f, buffer, to_read, &br);
-            if (fr != FR_OK) {
-                tcp_server_result(server, -1);
-                return false;
-            }
-            total_read += br;
-        }
-
-        // Write data to TCP stream
-        cyw43_arch_lwip_begin();
-        err_t err = tcp_write(server->client_pcb, buffer, br,
-                              TCP_WRITE_FLAG_COPY | (total_read < finfo.fsize ? TCP_WRITE_FLAG_MORE : 0));
-        needs_retry = err != ERR_OK;
-        tcp_output(server->client_pcb);
-        cyw43_arch_lwip_end();
-
-        if (total_read == finfo.fsize) {
-            break;
-        }
-
-        sleep_ms(1);
-    }
-
-    f_close(&f);
-
-    // wait for client to acknowledge file was received
-    while (server->status != STATUS_FILE_RECEIVED) {
-        if (server->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
-    }
-
-    return true;
-}
-
-// ----------------------------------------------------------------------------
-// Directory info handler
-
-static FSIZE_t get_size(const char *path) {
-    FILINFO finfo;
-    FRESULT fr = f_stat(path, &finfo);
-    if (fr != FR_OK) {
-        return 0;
-    }
-
-    return finfo.fsize;
-}
-
-static bool process_dirinfo_request(struct tcpserver *server) {
-    server->sent_len = 0;
-
-    // get a list of all .SST files in the root directory
-    FRESULT fr;
-    DIR dj;
-    FILINFO fno;
-    uint all = 0;
-
-    struct list *to_import = list_create();
-    fr = f_findfirst(&dj, &fno, "", "?????.SST");
-    while (fr == FR_OK && fno.fname[0]) {
-        ++all;
-        list_push(to_import, fno.fname);
-        fr = f_findnext(&dj, &fno);
-    }
-    f_closedir(&dj);
-
-    // calculate total size
-    static FSIZE_t file_data_size =
-        (FILENAME_LENGTH - 1) + sizeof(FSIZE_t) + sizeof(time_t) + sizeof(uint32_t) + sizeof(uint8_t);
-    FSIZE_t dirinfo_size = PICO_UNIQUE_BOARD_ID_SIZE_BYTES + // board identifier
-                           sizeof(uint16_t) +                // sample rate
-                           all * file_data_size;             // file info (name, size, timestamp) for all SSTs
-    server->data_len = sizeof(FSIZE_t) +                     // directory info size
-                       dirinfo_size;                         // directory info
-
-    // send size
-    cyw43_arch_lwip_begin();
-    tcp_write(server->client_pcb, &dirinfo_size, sizeof(FSIZE_t), TCP_WRITE_FLAG_COPY);
-    tcp_output(server->client_pcb);
-    cyw43_arch_lwip_end();
-
-    // wait for client to accept and validate size
-    while (server->status != STATUS_HEADER_OK) {
-        if (server->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
-    }
-
-    // send board id and sample rate
-    cyw43_arch_lwip_begin();
-    static uint16_t SAMPLE_RATE = 1000;
-    tcp_write(server->client_pcb, board_id.id, PICO_UNIQUE_BOARD_ID_SIZE_BYTES,
-              TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    tcp_write(server->client_pcb, &SAMPLE_RATE, sizeof(uint16_t), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    cyw43_arch_lwip_end();
-
-    // send metadata of each SST file
-    struct node *n = to_import->head;
-    bool needs_retry = false;
-    while (n != NULL) {
-        static char record[30];
-        if (!needs_retry) {
-            // These will be dummy values if reading them fails, so that the combined size
-            // we sent earlier would be correct.
-            FSIZE_t size = get_size(n->data);
-            struct sst_file_info info = sst_get_file_info(n->data);
-            int off = 0;
-            memcpy(record + off, n->data, FILENAME_LENGTH - 1);          off += FILENAME_LENGTH - 1;
-            memcpy(record + off, &size, sizeof(FSIZE_t));                 off += sizeof(FSIZE_t);
-            memcpy(record + off, &info.timestamp, sizeof(time_t));        off += sizeof(time_t);
-            memcpy(record + off, &info.duration_ms, sizeof(uint32_t));    off += sizeof(uint32_t);
-            memcpy(record + off, &info.version, sizeof(uint8_t));
-        }
-
-        cyw43_arch_lwip_begin();
-        err_t err = tcp_write(server->client_pcb, &record, file_data_size,
-                              TCP_WRITE_FLAG_COPY | (n->next != NULL ? TCP_WRITE_FLAG_MORE : 0));
-        needs_retry = err != ERR_OK;
-        tcp_output(server->client_pcb);
-        cyw43_arch_lwip_end();
-
-        if (!needs_retry) {
-            n = n->next;
-        }
-
-        sleep_ms(1);
-    }
-    list_delete(to_import);
-
-    // wait for client to acknowledge file was received
-    while (server->status != STATUS_FILE_RECEIVED) {
-        if (server->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
-    }
-
-    return true;
-}
-
-// SST file trash handler
-static bool process_sst_file_trash(struct tcpserver *server) {
-    TCHAR path_old[10];
-    TCHAR path_new[16];
-    sprintf(path_old, "%05d.SST", -server->requested_file);
-    sprintf(path_new, "trash/%s", path_old);
-    f_rename(path_old, path_new);
-
-    // send file trashed status
-    static int status = STATUS_FILE_TRASHED;
-    cyw43_arch_lwip_begin();
-    tcp_write(server->client_pcb, &status, sizeof(int), TCP_WRITE_FLAG_COPY);
-    tcp_output(server->client_pcb);
-    cyw43_arch_lwip_end();
-
-    // wait for client to acknowledge the status update was received.
-    // NOTE: This is handled this way so that the TCP connection is closed by
-    //       the server during file deletion too. It would be simpler if the
-    //       client closed it, but I think the consistency is worth an extra
-    //       byte of network traffic.
-    while (server->status != STATUS_FILE_RECEIVED) {
-        if (server->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
-    }
-
-    return true;
-}
-
-static bool tcpserver_process(struct tcpserver *server) {
-    if (server->requested_file == 0) {
-        return process_dirinfo_request(server);
-    } else if (server->requested_file < 0) {
-        return process_sst_file_trash(server);
-    } else if (process_sst_file_request(server)) {
-        if (server->options.mark_downloaded_on_success) {
-            TCHAR path_old[10];
-            TCHAR path_new[19];
-            sprintf(path_old, "%05d.SST", server->requested_file);
-            sprintf(path_new, "uploaded/%s", path_old);
-            f_rename(path_old, path_new);
-        }
-        return true;
-    }
-
-    return false;
-}
-
-static void tcpserver_teardown(struct tcpserver *server) {
-    tcp_server_close(server);
     if (server->mdns_service_added && server->netif != NULL) {
         mdns_resp_del_service(server->netif, server->mdns_slot);
         server->mdns_service_added = false;
@@ -486,40 +281,24 @@ static void tcpserver_teardown(struct tcpserver *server) {
     }
 }
 
-// ----------------------------------------------------------------------------
-// MDNS functions
-static void mdns_srv_txt(struct mdns_service *service, void *txt_userdata) {
-    err_t res;
-    LWIP_UNUSED_ARG(txt_userdata);
-
-    res = mdns_resp_add_service_txtitem(service, NULL, 0);
-    LWIP_ERROR("mdns add service txt failed\n", (res == ERR_OK), return);
-}
-
-// ----------------------------------------------------------------------------
-// "Public" functions
-
 bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *options) {
-    pico_get_unique_board_id(&board_id);
-
     LOG("TCP", "Initializing server\n");
-    server->status = 0;
-    server->requested_file = 0;
-    server->data_len = 0;
-    server->sent_len = 0;
-    server->client_pcb = NULL;
+
     server->server_pcb = NULL;
+    server->client_pcb = NULL;
     server->netif = wifi_active_netif();
     server->mdns_slot = -1;
     server->mdns_netif_added = false;
     server->mdns_service_added = false;
+    server->finish_requested = false;
+    server->last_error = 0;
     server->options = options != NULL ? *options
                                       : (struct tcpserver_options){
                                             .allow_live_preview = true,
                                             .enable_mdns = true,
                                             .mark_downloaded_on_success = true,
                                         };
-    live_stream_core1_reset(server);
+    tcpserver_reset_connection_state(server);
 
     if (server->netif == NULL) {
         LOG("TCP", "No active netif available for TCP server\n");
@@ -536,8 +315,8 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
 
         if (mdns_resp_add_netif(server->netif, "sufni_telemetry_daq") == ERR_OK) {
             server->mdns_netif_added = true;
-            server->mdns_slot =
-                mdns_resp_add_service(server->netif, "sufnidaq", "_gosst", DNSSD_PROTO_TCP, 1557, mdns_srv_txt, NULL);
+            server->mdns_slot = mdns_resp_add_service(server->netif, "sufnidaq", "_gosst", DNSSD_PROTO_TCP, TCP_PORT,
+                                                      mdns_srv_txt, NULL);
             if (server->mdns_slot >= 0) {
                 server->mdns_service_added = true;
                 mdns_resp_announce(server->netif);
@@ -551,48 +330,47 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
 
     if (!tcp_server_open(server)) {
         LOG("TCP", "Failed to open server\n");
-        tcp_server_result(server, -1);
+        tcpserver_teardown(server);
         return false;
     }
 
     LOG("TCP", "Server listening on port %d, IP: %s\n", TCP_PORT, ip4addr_ntoa(netif_ip4_addr(server->netif)));
-    server->status = STATUS_INITIALIZED;
-
     return true;
 }
 
 bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
     LOG("TCP", "Server started, waiting for requests\n");
-    while (server->status != STATUS_FINISHED) {
+
+    while (!server->finish_requested) {
         if (stop_requested != NULL && *stop_requested) {
             tcpserver_finish(server);
-            continue;
         }
 
-        if (server->status < 0) {
-            if (server->options.allow_live_preview) {
-                live_stream_core1_abort(server);
-            }
-            LOG("TCP", "Client/session error: %d\n", server->status);
-            server->status = STATUS_INITIALIZED;
-        } else if (server->status == STATUS_FILE_REQUESTED) {
-            if (!tcpserver_process(server)) {
-                LOG("TCP", "Request processing failed\n");
-                server->status = STATUS_INITIALIZED;
-            }
-        } else if (server->options.allow_live_preview &&
-                   (server->protocol_mode == TCPSERVER_PROTOCOL_LIVE || server->live_session_active ||
-                    server->live_start_pending || server->live_stop_pending)) {
-            live_stream_core1_service(server);
+        if (!server->client_connected) {
+            tcpserver_clear_stale_management_response();
         }
+
+        if (server->client_connected) {
+            if (server->close_client_requested || !tcpserver_process_client(server)) {
+                int error_code = server->last_error;
+                tcpserver_close_client(server);
+                if (error_code != 0) {
+                    LOG("TCP", "Client/session closed with error: %d\n", error_code);
+                }
+                server->last_error = 0;
+            }
+        }
+
         sleep_ms(1);
     }
+
     LOG("TCP", "Server stopping\n");
     tcpserver_teardown(server);
     return true;
 }
 
-void inline tcpserver_finish(struct tcpserver *server) {
+void tcpserver_finish(struct tcpserver *server) {
     LOG("TCP", "Server finish requested\n");
-    server->status = STATUS_FINISHED;
+    server->finish_requested = true;
+    server->close_client_requested = true;
 }

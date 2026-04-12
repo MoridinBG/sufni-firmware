@@ -2,13 +2,18 @@
 #define LIVE_STREAM_CORE1_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
-struct tcpserver;
+struct tcpserver_protocol_ops;
 
-bool live_stream_core1_can_accept_client(const struct tcpserver *server);
-void live_stream_core1_reset(struct tcpserver *server);
-bool live_stream_core1_process_rx(struct tcpserver *server);
-void live_stream_core1_service(struct tcpserver *server);
-void live_stream_core1_abort(struct tcpserver *server);
+struct live_protocol_session {
+    bool session_active;
+    bool start_pending;
+    bool stop_pending;
+    uint32_t tx_sequence;
+    uint64_t last_stats_us;
+};
+
+extern const struct tcpserver_protocol_ops live_stream_core1_protocol_ops;
 
 #endif // LIVE_STREAM_CORE1_H

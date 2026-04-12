@@ -37,7 +37,7 @@ time_t rtc_timestamp() {
     // RP2350: use linear time methods (native to Powman Timer), no timezone conversion
     struct timespec ts;
     aon_timer_get_time(&ts);
-    return ts.tv_sec;  // Already UTC timestamp
+    return ts.tv_sec; // Already UTC timestamp
 #endif
 }
 
@@ -63,25 +63,28 @@ void setup_ntp(const char *server) {
     }
 }
 
-uint64_t get_system_time_us() {
-    uint64_t t = start_time_us + time_us_64();
-    return start_time_us + time_us_64();
-}
+uint64_t get_system_time_us() { return start_time_us + time_us_64(); }
 
-void set_system_time_us(uint32_t sec, uint32_t us) {
-    time_t epoch = sec;
-    struct tm *tm_utc = gmtime(&epoch);
+bool set_system_time_utc(time_t epoch_seconds, uint32_t micros) {
+    struct tm tm_utc;
+
+    if (micros >= 1000000u || gmtime_r(&epoch_seconds, &tm_utc) == NULL) {
+        return false;
+    }
 
 #if PICO_RP2040
-    aon_timer_set_time_calendar(tm_utc);
+    aon_timer_set_time_calendar(&tm_utc);
 #else
-    struct timespec ts = {.tv_sec = epoch, .tv_nsec = us * 1000};
+    struct timespec ts = {.tv_sec = epoch_seconds, .tv_nsec = (long)micros * 1000L};
     aon_timer_set_time(&ts);
 #endif
 
     // Always update the external DS3231 RTC with UTC time
-    ds3231_set_datetime(&rtc, tm_utc);
+    ds3231_set_datetime(&rtc, &tm_utc);
 
-    start_time_us = (epoch * 1000000 + us) - time_us_64();
+    start_time_us = (((uint64_t)epoch_seconds * 1000000u) + micros) - time_us_64();
     ntp_done = true;
+    return true;
 }
+
+void set_system_time_us(uint32_t sec, uint32_t us) { (void)set_system_time_utc((time_t)sec, us); }

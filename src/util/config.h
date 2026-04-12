@@ -24,6 +24,9 @@ struct config {
 
 extern struct config config;
 
+bool config_load_file(const char *path, struct config *out);
+bool config_commit_staged_file(const char *staged_path);
+void config_apply_snapshot(const struct config *snapshot);
 bool load_config();
 
 #endif // SUFNI_FW_UTIL_CONFIG_H

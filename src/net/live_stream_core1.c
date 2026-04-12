@@ -5,6 +5,7 @@
 
 #include "../fw/live_stream_shared.h"
 #include "../fw/sensor_setup.h"
+#include "../util/log.h"
 
 #include "lwip/tcp.h"
 #include "pico/cyw43_arch.h"
@@ -12,7 +13,31 @@
 
 #include <string.h>
 
-#include "../util/log.h"
+static bool live_protocol_can_accept(const struct tcpserver *server);
+static void live_protocol_on_accept(struct tcpserver *server);
+static void live_protocol_on_disconnect(struct tcpserver *server);
+static bool live_protocol_detect(const struct tcpserver *server);
+static bool live_stream_core1_process_rx(struct tcpserver *server);
+static void live_stream_core1_service(struct tcpserver *server);
+static bool live_stream_core1_needs_service(const struct tcpserver *server);
+static void live_stream_core1_abort(struct tcpserver *server);
+
+const struct tcpserver_protocol_ops live_stream_core1_protocol_ops = {
+    .can_accept = live_protocol_can_accept,
+    .on_accept = live_protocol_on_accept,
+    .on_disconnect = live_protocol_on_disconnect,
+    .detect = live_protocol_detect,
+    .process_rx = live_stream_core1_process_rx,
+    .service = live_stream_core1_service,
+    .needs_service = live_stream_core1_needs_service,
+};
+
+static void live_reset_session(struct tcpserver *server) {
+    server->live = (struct live_protocol_session){
+        .tx_sequence = 1,
+        .last_stats_us = time_us_64(),
+    };
+}
 
 static bool live_send_frame(struct tcpserver *server, uint16_t frame_type, const void *payload, uint32_t payload_length,
                             uint32_t sequence) {
@@ -26,12 +51,18 @@ static bool live_send_frame(struct tcpserver *server, uint16_t frame_type, const
     uint32_t total_bytes = sizeof(header) + payload_length;
     err_t err = ERR_OK;
 
+    if (server->client_pcb == NULL) {
+        return false;
+    }
+
     cyw43_arch_lwip_begin();
     if (tcp_sndbuf(server->client_pcb) < total_bytes) {
         cyw43_arch_lwip_end();
         return false;
     }
-    err = tcp_write(server->client_pcb, &header, sizeof(header), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+
+    err = tcp_write(server->client_pcb, &header, sizeof(header),
+                    TCP_WRITE_FLAG_COPY | (payload_length > 0u ? TCP_WRITE_FLAG_MORE : 0u));
     if (err == ERR_OK && payload_length > 0u) {
         err = tcp_write(server->client_pcb, payload, payload_length, TCP_WRITE_FLAG_COPY);
     }
@@ -43,23 +74,21 @@ static bool live_send_frame(struct tcpserver *server, uint16_t frame_type, const
     return err == ERR_OK;
 }
 
-static void live_consume_rx(struct tcpserver *server, uint16_t bytes_to_consume) {
-    if (bytes_to_consume >= server->rx_len) {
-        server->rx_len = 0;
-        return;
+static bool live_send_error(struct tcpserver *server, int32_t error_code) {
+    uint32_t sequence = server->live.tx_sequence;
+    struct live_error_frame frame = {.error_code = error_code};
+
+    LOG("LIVE", "Sending error: %d\n", (int)error_code);
+    if (!live_send_frame(server, LIVE_FRAME_ERROR, &frame, sizeof(frame), sequence)) {
+        return false;
     }
 
-    memmove(server->rx_buffer, server->rx_buffer + bytes_to_consume, server->rx_len - bytes_to_consume);
-    server->rx_len -= bytes_to_consume;
-}
-
-static bool live_send_error(struct tcpserver *server, int32_t error_code) {
-    LOG("LIVE", "Sending error: %d\n", (int)error_code);
-    struct live_error_frame frame = {.error_code = error_code};
-    return live_send_frame(server, LIVE_FRAME_ERROR, &frame, sizeof(frame), server->live_tx_sequence++);
+    server->live.tx_sequence++;
+    return true;
 }
 
 static bool live_send_start_ack(struct tcpserver *server) {
+    uint32_t sequence = server->live.tx_sequence;
     struct live_start_ack_frame frame = {
         .result = live_stream_shared.start_response.result,
         .session_id = live_stream_shared.start_response.session_id,
@@ -68,18 +97,30 @@ static bool live_send_start_ack(struct tcpserver *server) {
 
     LOG("LIVE", "Sending START_ACK: result=%d, session=%u, mask=0x%02x\n", (int)frame.result,
         (unsigned)frame.session_id, (unsigned)frame.selected_sensor_mask);
-    return live_send_frame(server, LIVE_FRAME_START_LIVE_ACK, &frame, sizeof(frame), server->live_tx_sequence++);
+    if (!live_send_frame(server, LIVE_FRAME_START_LIVE_ACK, &frame, sizeof(frame), sequence)) {
+        return false;
+    }
+
+    server->live.tx_sequence++;
+    return true;
 }
 
 static bool live_send_stop_ack(struct tcpserver *server) {
+    uint32_t sequence = server->live.tx_sequence;
     struct live_stop_ack_frame frame = {
         .session_id = live_stream_shared.start_response.session_id,
     };
 
-    return live_send_frame(server, LIVE_FRAME_STOP_LIVE_ACK, &frame, sizeof(frame), server->live_tx_sequence++);
+    if (!live_send_frame(server, LIVE_FRAME_STOP_LIVE_ACK, &frame, sizeof(frame), sequence)) {
+        return false;
+    }
+
+    server->live.tx_sequence++;
+    return true;
 }
 
 static bool live_send_session_header(struct tcpserver *server) {
+    uint32_t sequence = server->live.tx_sequence;
     struct live_session_header_frame frame = {
         .session_id = live_stream_shared.start_response.session_id,
         .accepted_travel_hz = live_stream_shared.start_response.accepted_travel_hz,
@@ -106,10 +147,16 @@ static bool live_send_session_header(struct tcpserver *server) {
     }
 #endif
 
-    return live_send_frame(server, LIVE_FRAME_SESSION_HEADER, &frame, sizeof(frame), server->live_tx_sequence++);
+    if (!live_send_frame(server, LIVE_FRAME_SESSION_HEADER, &frame, sizeof(frame), sequence)) {
+        return false;
+    }
+
+    server->live.tx_sequence++;
+    return true;
 }
 
 static bool live_send_session_stats(struct tcpserver *server) {
+    uint32_t sequence = server->live.tx_sequence;
     struct live_session_stats_frame frame = {
         .session_id = live_stream_shared.start_response.session_id,
         .travel_queue_depth = live_stream_shared.travel_stats.queue_depth,
@@ -120,7 +167,12 @@ static bool live_send_session_stats(struct tcpserver *server) {
         .gps_dropped_batches = live_stream_shared.gps_stats.dropped_batches,
     };
 
-    return live_send_frame(server, LIVE_FRAME_SESSION_STATS, &frame, sizeof(frame), server->live_tx_sequence++);
+    if (!live_send_frame(server, LIVE_FRAME_SESSION_STATS, &frame, sizeof(frame), sequence)) {
+        return false;
+    }
+
+    server->live.tx_sequence++;
+    return true;
 }
 
 static int live_claim_oldest_ready_slot(void *base, size_t stride, uint32_t slot_count) {
@@ -164,13 +216,13 @@ static bool live_send_slot_frame(struct tcpserver *server, uint16_t frame_type, 
         .version = LIVE_PROTOCOL_VERSION,
         .frame_type = frame_type,
         .payload_length = sizeof(batch) + header->payload_bytes,
-        .sequence = server->live_tx_sequence,
+        .sequence = server->live.tx_sequence,
     };
     uint32_t total_bytes = sizeof(frame_header) + sizeof(batch) + header->payload_bytes;
     err_t err = ERR_OK;
 
     cyw43_arch_lwip_begin();
-    if (tcp_sndbuf(server->client_pcb) < total_bytes) {
+    if (server->client_pcb == NULL || tcp_sndbuf(server->client_pcb) < total_bytes) {
         cyw43_arch_lwip_end();
         __atomic_store_n(&header->state, LIVE_SLOT_READY, __ATOMIC_RELEASE);
         return false;
@@ -183,7 +235,7 @@ static bool live_send_slot_frame(struct tcpserver *server, uint16_t frame_type, 
         err = tcp_write(server->client_pcb, payload, header->payload_bytes, TCP_WRITE_FLAG_COPY);
     }
     if (err == ERR_OK) {
-        server->live_tx_sequence++;
+        server->live.tx_sequence++;
         tcp_output(server->client_pcb);
     }
     cyw43_arch_lwip_end();
@@ -225,7 +277,7 @@ static bool live_send_next_ready_slot(struct tcpserver *server) {
 }
 
 static void live_queue_start_request(struct tcpserver *server, const struct live_start_request_frame *frame) {
-    if (server->live_start_pending || server->live_session_active ||
+    if (server->live.start_pending || server->live.session_active ||
         live_stream_get_control_state() != LIVE_CONTROL_IDLE) {
         live_send_error(server, LIVE_START_RESULT_BUSY);
         return;
@@ -238,39 +290,43 @@ static void live_queue_start_request(struct tcpserver *server, const struct live
         .requested_imu_hz = frame->imu_hz,
         .requested_gps_fix_hz = frame->gps_fix_hz,
     };
-    server->live_start_pending = true;
+    server->live.start_pending = true;
     live_stream_set_control_state(LIVE_CONTROL_START_REQUESTED);
 }
 
 static void live_queue_stop_request(struct tcpserver *server) {
-    if (!server->live_session_active) {
+    if (!server->live.session_active) {
         live_send_stop_ack(server);
         return;
     }
 
-    if (!server->live_stop_pending) {
-        server->live_stop_pending = true;
+    if (!server->live.stop_pending) {
+        server->live.stop_pending = true;
         live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
     }
 }
 
-bool live_stream_core1_can_accept_client(const struct tcpserver *server) {
+static bool live_protocol_can_accept(const struct tcpserver *server) {
     return live_stream_get_control_state() == LIVE_CONTROL_IDLE && !live_stream_shared.active &&
-           !server->live_session_active && !server->live_start_pending && !server->live_stop_pending;
+           !server->live.session_active && !server->live.start_pending && !server->live.stop_pending;
 }
 
-void live_stream_core1_reset(struct tcpserver *server) {
-    server->protocol_mode = TCPSERVER_PROTOCOL_UNKNOWN;
-    server->live_session_active = false;
-    server->live_start_pending = false;
-    server->live_stop_pending = false;
-    server->live_tx_sequence = 1;
-    server->last_stats_us = time_us_64();
-    server->rx_len = 0;
-    memset(server->rx_buffer, 0, sizeof(server->rx_buffer));
+static void live_protocol_on_accept(struct tcpserver *server) { live_reset_session(server); }
+
+static void live_protocol_on_disconnect(struct tcpserver *server) { live_stream_core1_abort(server); }
+
+static bool live_protocol_detect(const struct tcpserver *server) {
+    uint32_t magic;
+
+    if (server->rx_len < sizeof(magic)) {
+        return false;
+    }
+
+    memcpy(&magic, server->rx_buffer, sizeof(magic));
+    return magic == LIVE_PROTOCOL_MAGIC;
 }
 
-bool live_stream_core1_process_rx(struct tcpserver *server) {
+static bool live_stream_core1_process_rx(struct tcpserver *server) {
     while (server->rx_len >= sizeof(struct live_frame_header)) {
         struct live_frame_header header;
         uint16_t frame_bytes;
@@ -305,7 +361,10 @@ bool live_stream_core1_process_rx(struct tcpserver *server) {
                 live_queue_stop_request(server);
                 break;
             case LIVE_FRAME_PING:
-                live_send_frame(server, LIVE_FRAME_PONG, NULL, 0, server->live_tx_sequence++);
+                if (!live_send_frame(server, LIVE_FRAME_PONG, NULL, 0, server->live.tx_sequence)) {
+                    return true;
+                }
+                server->live.tx_sequence++;
                 break;
             default:
                 LOG("LIVE", "RX unknown frame type: %u\n", (unsigned)header.frame_type);
@@ -313,55 +372,62 @@ bool live_stream_core1_process_rx(struct tcpserver *server) {
                 break;
         }
 
-        live_consume_rx(server, frame_bytes);
+        tcpserver_consume_rx(server, frame_bytes);
     }
 
     return true;
 }
 
-void live_stream_core1_service(struct tcpserver *server) {
-    if (server->live_start_pending && live_stream_get_control_state() == LIVE_CONTROL_START_RESPONSE_READY) {
-        live_send_start_ack(server);
+static void live_stream_core1_service(struct tcpserver *server) {
+    if (server->live.start_pending && live_stream_get_control_state() == LIVE_CONTROL_START_RESPONSE_READY) {
+        if (!live_send_start_ack(server)) {
+            return;
+        }
         if (live_stream_shared.start_response.result == LIVE_START_RESULT_OK) {
             LOG("LIVE", "Session %u started, mask=0x%02x\n", (unsigned)live_stream_shared.start_response.session_id,
                 (unsigned)live_stream_shared.start_response.selected_sensor_mask);
-            server->live_session_active = true;
+            server->live.session_active = true;
             live_send_session_header(server);
             live_send_session_stats(server);
         }
-        server->live_start_pending = false;
+        server->live.start_pending = false;
         live_stream_set_control_state(LIVE_CONTROL_IDLE);
     }
 
-    if (server->live_stop_pending && live_stream_get_control_state() == LIVE_CONTROL_STOP_RESPONSE_READY) {
+    if (server->live.stop_pending && live_stream_get_control_state() == LIVE_CONTROL_STOP_RESPONSE_READY) {
         LOG("LIVE", "Session stopped\n");
-        if (server->client_pcb != NULL) {
-            live_send_stop_ack(server);
+        if (server->client_pcb != NULL && !live_send_stop_ack(server)) {
+            return;
         }
-        server->live_start_pending = false;
-        server->live_session_active = false;
-        server->live_stop_pending = false;
+        server->live.start_pending = false;
+        server->live.session_active = false;
+        server->live.stop_pending = false;
         live_stream_set_control_state(LIVE_CONTROL_IDLE);
     }
 
-    if (server->live_session_active && server->client_pcb != NULL) {
+    if (server->live.session_active && server->client_pcb != NULL) {
         live_send_next_ready_slot(server);
-        if ((time_us_64() - server->last_stats_us) >= 500000u) {
-            live_send_session_stats(server);
-            server->last_stats_us = time_us_64();
+        if ((time_us_64() - server->live.last_stats_us) >= 500000u) {
+            if (live_send_session_stats(server)) {
+                server->live.last_stats_us = time_us_64();
+            }
         }
     }
 }
 
-void live_stream_core1_abort(struct tcpserver *server) {
-    if ((server->live_start_pending || server->live_session_active || server->live_stop_pending ||
+static bool live_stream_core1_needs_service(const struct tcpserver *server) {
+    return server->live.start_pending || server->live.session_active || server->live.stop_pending;
+}
+
+static void live_stream_core1_abort(struct tcpserver *server) {
+    if ((server->live.start_pending || server->live.session_active || server->live.stop_pending ||
          live_stream_shared.active || live_stream_get_control_state() != LIVE_CONTROL_IDLE) &&
-        !server->live_stop_pending) {
-        LOG("LIVE", "Aborting session (active=%d, start_pending=%d, stop_pending=%d)\n", server->live_session_active,
-            server->live_start_pending, server->live_stop_pending);
-        server->live_start_pending = false;
-        server->live_session_active = live_stream_shared.active;
-        server->live_stop_pending = true;
+        !server->live.stop_pending) {
+        LOG("LIVE", "Aborting session (active=%d, start_pending=%d, stop_pending=%d)\n", server->live.session_active,
+            server->live.start_pending, server->live.stop_pending);
+        server->live.start_pending = false;
+        server->live.session_active = live_stream_shared.active;
+        server->live.stop_pending = true;
         live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
     }
 }

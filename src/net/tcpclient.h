@@ -3,7 +3,7 @@
 
 #include "lwip/ip_addr.h"
 
-struct connection {
+struct tcpclient_connection {
     struct tcp_pcb *pcb;
     ip_addr_t remote_addr;
     uint32_t data_len;

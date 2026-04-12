@@ -25,8 +25,8 @@
 #define STATUS_DATA_SENT 5
 #define STATUS_SUCCESS   6
 
-static err_t tcp_client_close(void *arg) {
-    struct connection *conn = (struct connection *)arg;
+static err_t tcpclient_close(void *arg) {
+    struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
     err_t err = ERR_OK;
     if (conn->pcb != NULL) {
         tcp_arg(conn->pcb, NULL);
@@ -44,14 +44,14 @@ static err_t tcp_client_close(void *arg) {
     return err;
 }
 
-static err_t tcp_result(void *arg, int8_t status) {
-    struct connection *conn = (struct connection *)arg;
+static err_t tcpclient_finish_with_status(void *arg, int8_t status) {
+    struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
     conn->status = status;
-    return tcp_client_close(arg);
+    return tcpclient_close(arg);
 }
 
 static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
-    struct connection *conn = (struct connection *)arg;
+    struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
     conn->sent_len += len;
 
     if (conn->sent_len == conn->data_len) {
@@ -63,27 +63,25 @@ static err_t tcp_client_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
 
 static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     if (err != ERR_OK) {
-        return tcp_result(arg, err);
+        return tcpclient_finish_with_status(arg, err);
     }
-    struct connection *conn = (struct connection *)arg;
+    struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
     conn->status = STATUS_CONNECTED;
     return ERR_OK;
 }
 
-static err_t tcp_client_poll(void *arg, struct tcp_pcb *tpcb) {
-    return tcp_result(arg, -1); // no response is an error?
-}
+static err_t tcp_client_poll(void *arg, struct tcp_pcb *tpcb) { return tcpclient_finish_with_status(arg, -1); }
 
 static void tcp_client_err(void *arg, err_t err) {
     if (err != ERR_ABRT) {
-        tcp_result(arg, err);
+        tcpclient_finish_with_status(arg, err);
     }
 }
 
 err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
-    struct connection *conn = (struct connection *)arg;
+    struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
     if (NULL == p) {
-        return tcp_result(arg, -1);
+        return tcpclient_finish_with_status(arg, -1);
     }
 
     cyw43_arch_lwip_check();
@@ -92,7 +90,7 @@ err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err
         tcp_recved(tpcb, p->tot_len);
 
         if (s < 0 || s == STATUS_SUCCESS) {
-            tcp_result(arg, s);
+            tcpclient_finish_with_status(arg, s);
         } else {
             conn->status = s;
         }
@@ -103,15 +101,25 @@ err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err
 }
 
 static void dns_found(const char *hostname, const ip_addr_t *ipaddr, void *arg) {
-    struct connection *conn = (struct connection *)arg;
+    struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
     if (ipaddr != NULL) {
         conn->remote_addr = *ipaddr;
         conn->status = STATUS_DNS_FOUND;
     }
 }
 
-static bool tcp_client_open(void *arg) {
-    struct connection *conn = (struct connection *)arg;
+static bool tcpclient_wait_for_status(struct tcpclient_connection *conn, int8_t expected_status) {
+    while (conn->status != expected_status) {
+        if (conn->status < 0) {
+            return false;
+        }
+        sleep_ms(1);
+    }
+
+    return true;
+}
+
+static bool tcpclient_open(struct tcpclient_connection *conn) {
 
     cyw43_arch_lwip_begin();
     err_t err = dns_gethostbyname(config.sst_server, &conn->remote_addr, dns_found, conn);
@@ -120,12 +128,8 @@ static bool tcp_client_open(void *arg) {
     if (err == ERR_OK) { // domain name was in cache
         conn->status = STATUS_DNS_FOUND;
     }
-    while (conn->status != STATUS_DNS_FOUND) {
-        if (conn->status < 0) {
-            free(conn);
-            return false;
-        }
-        sleep_ms(1);
+    if (!tcpclient_wait_for_status(conn, STATUS_DNS_FOUND)) {
+        return false;
     }
 
     conn->pcb = tcp_new_ip_type(IP_GET_TYPE(&conn->remote_addr));
@@ -146,8 +150,8 @@ static bool tcp_client_open(void *arg) {
     return err == ERR_OK;
 }
 
-static struct connection *tcp_client_init() {
-    struct connection *conn = malloc(sizeof(struct connection));
+static struct tcpclient_connection *tcpclient_create_connection(void) {
+    struct tcpclient_connection *conn = malloc(sizeof(struct tcpclient_connection));
     if (conn == NULL) {
         return NULL;
     }
@@ -174,20 +178,17 @@ bool send_file(const char *filename) {
         return false;
     }
 
-    struct connection *conn = tcp_client_init();
+    struct tcpclient_connection *conn = tcpclient_create_connection();
     if (conn == NULL) {
         return false;
     }
-    if (!tcp_client_open(conn)) {
-        tcp_result(&conn, -1);
+    if (!tcpclient_open(conn)) {
+        tcpclient_finish_with_status(conn, -1);
         return false;
     }
 
-    while (conn->status != STATUS_CONNECTED) {
-        if (conn->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
+    if (!tcpclient_wait_for_status(conn, STATUS_CONNECTED)) {
+        return false;
     }
 
     conn->data_len = 2 + // the constant string "ID"
@@ -203,11 +204,8 @@ bool send_file(const char *filename) {
     tcp_output(conn->pcb);
     cyw43_arch_lwip_end();
 
-    while (conn->status != STATUS_HEADER_OK) {
-        if (conn->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
+    if (!tcpclient_wait_for_status(conn, STATUS_HEADER_OK)) {
+        return false;
     }
 
     static uint8_t buffer[READ_BUF_LEN];
@@ -230,7 +228,7 @@ bool send_file(const char *filename) {
         if (!needs_retry) {
             fr = f_read(&f, buffer, to_read, &br);
             if (fr != FR_OK) {
-                tcp_result(conn, -1);
+                tcpclient_finish_with_status(conn, -1);
                 return false;
             }
             total_read += br;
@@ -253,11 +251,8 @@ bool send_file(const char *filename) {
 
     f_close(&f);
 
-    while (conn->status != STATUS_SUCCESS) {
-        if (conn->status < 0) {
-            return false;
-        }
-        sleep_ms(1);
+    if (!tcpclient_wait_for_status(conn, STATUS_SUCCESS)) {
+        return false;
     }
 
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
