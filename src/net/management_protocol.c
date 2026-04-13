@@ -14,6 +14,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MANAGEMENT_TX_FRAME_BUFFER_SIZE                                                                                \
+    (sizeof(struct management_frame_header) + MANAGEMENT_PROTOCOL_MAX_CHUNK_PAYLOAD_SIZE)
+
+static uint8_t management_tx_frame_buffer[MANAGEMENT_TX_FRAME_BUFFER_SIZE];
+
 static bool management_protocol_can_accept(const struct tcpserver *server);
 static void management_protocol_on_accept(struct tcpserver *server);
 static void management_protocol_on_disconnect(struct tcpserver *server);
@@ -39,10 +44,15 @@ static bool management_send_frame(struct tcpserver *server, uint16_t frame_type,
         .payload_length = payload_length,
     };
     uint32_t total_bytes = sizeof(header) + payload_length;
-    err_t err = ERR_OK;
+    err_t err;
 
-    if (server->client_pcb == NULL) {
+    if (server->client_pcb == NULL || total_bytes > sizeof(management_tx_frame_buffer)) {
         return false;
+    }
+
+    memcpy(management_tx_frame_buffer, &header, sizeof(header));
+    if (payload_length > 0u) {
+        memcpy(management_tx_frame_buffer + sizeof(header), payload, payload_length);
     }
 
     cyw43_arch_lwip_begin();
@@ -51,11 +61,7 @@ static bool management_send_frame(struct tcpserver *server, uint16_t frame_type,
         return false;
     }
 
-    err = tcp_write(server->client_pcb, &header, sizeof(header),
-                    TCP_WRITE_FLAG_COPY | (payload_length > 0u ? TCP_WRITE_FLAG_MORE : 0u));
-    if (err == ERR_OK && payload_length > 0u) {
-        err = tcp_write(server->client_pcb, payload, payload_length, TCP_WRITE_FLAG_COPY);
-    }
+    err = tcp_write(server->client_pcb, management_tx_frame_buffer, total_bytes, TCP_WRITE_FLAG_COPY);
     if (err == ERR_OK) {
         tcp_output(server->client_pcb);
     }

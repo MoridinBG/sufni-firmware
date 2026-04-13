@@ -1,5 +1,5 @@
-#ifndef LIVE_STREAM_CORE0_H
-#define LIVE_STREAM_CORE0_H
+#ifndef LIVE_CORE0_SESSION_H
+#define LIVE_CORE0_SESSION_H
 
 #include <stdbool.h>
 
@@ -19,4 +19,4 @@ void live_stream_core0_on_gps_fix(const struct gps_telemetry *telemetry);
 void gps_fix_router_on_fix(const struct gps_telemetry *telemetry);
 #endif
 
-#endif // LIVE_STREAM_CORE0_H
+#endif // LIVE_CORE0_SESSION_H

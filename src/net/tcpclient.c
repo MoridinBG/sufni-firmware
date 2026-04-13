@@ -80,19 +80,35 @@ static void tcp_client_err(void *arg, err_t err) {
 
 err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     struct tcpclient_connection *conn = (struct tcpclient_connection *)arg;
+    const struct pbuf *segment;
+
     if (NULL == p) {
         return tcpclient_finish_with_status(arg, -1);
     }
 
     cyw43_arch_lwip_check();
+    if (err != ERR_OK) {
+        pbuf_free(p);
+        return tcpclient_finish_with_status(arg, err);
+    }
+
     if (p->tot_len > 0) {
-        int8_t s = *(int8_t *)p->payload;
         tcp_recved(tpcb, p->tot_len);
 
-        if (s < 0 || s == STATUS_SUCCESS) {
-            tcpclient_finish_with_status(arg, s);
-        } else {
-            conn->status = s;
+        for (segment = p; segment != NULL; segment = segment->next) {
+            const int8_t *status_bytes = (const int8_t *)segment->payload;
+            u16_t index;
+
+            for (index = 0; index < segment->len; ++index) {
+                int8_t status = status_bytes[index];
+
+                if (status < 0 || status == STATUS_SUCCESS) {
+                    pbuf_free(p);
+                    return tcpclient_finish_with_status(arg, status);
+                }
+
+                conn->status = status;
+            }
         }
     }
     pbuf_free(p);
@@ -164,6 +180,7 @@ static struct tcpclient_connection *tcpclient_create_connection(void) {
 
 bool send_file(const char *filename) {
     pico_unique_board_id_t board_id;
+    uint8_t header[2 + PICO_UNIQUE_BOARD_ID_SIZE_BYTES + sizeof(FSIZE_t) + (FILENAME_LENGTH - 1)];
     pico_get_unique_board_id(&board_id);
 
     FILINFO finfo;
@@ -196,11 +213,18 @@ bool send_file(const char *filename) {
                      (FILENAME_LENGTH - 1) + // we don't send the terminating null byte
                      finfo.fsize;
 
+    memcpy(header, "ID", 2);
+    memcpy(header + 2, board_id.id, PICO_UNIQUE_BOARD_ID_SIZE_BYTES);
+    memcpy(header + 2 + PICO_UNIQUE_BOARD_ID_SIZE_BYTES, &finfo.fsize, sizeof(FSIZE_t));
+    memcpy(header + 2 + PICO_UNIQUE_BOARD_ID_SIZE_BYTES + sizeof(FSIZE_t), filename, FILENAME_LENGTH - 1);
+
     cyw43_arch_lwip_begin();
-    tcp_write(conn->pcb, "ID", 2, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    tcp_write(conn->pcb, board_id.id, PICO_UNIQUE_BOARD_ID_SIZE_BYTES, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    tcp_write(conn->pcb, &finfo.fsize, sizeof(FSIZE_t), TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-    tcp_write(conn->pcb, filename, FILENAME_LENGTH - 1, TCP_WRITE_FLAG_COPY);
+    if (tcp_sndbuf(conn->pcb) < sizeof(header) ||
+        tcp_write(conn->pcb, header, sizeof(header), TCP_WRITE_FLAG_COPY) != ERR_OK) {
+        cyw43_arch_lwip_end();
+        tcpclient_finish_with_status(conn, -1);
+        return false;
+    }
     tcp_output(conn->pcb);
     cyw43_arch_lwip_end();
 

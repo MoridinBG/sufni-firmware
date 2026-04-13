@@ -40,7 +40,7 @@
 #include "fw_init.h"
 #include "fw_state.h"
 #include "helpers.h"
-#include "live_stream_core0.h"
+#include "live_core0_session.h"
 #include "management_shared.h"
 #include "sensor_setup.h"
 #include "sst.h"

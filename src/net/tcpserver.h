@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "live_stream_core1.h"
+#include "live_core1_protocol.h"
 #include "management_protocol.h"
 
 #include "lwip/tcp.h"
@@ -46,6 +46,7 @@ struct tcpserver {
     bool finish_requested;
     bool client_connected;
     bool close_client_requested;
+    volatile bool err_disconnect_pending;
     int last_error;
     enum tcpserver_protocol_mode protocol_mode;
     const struct tcpserver_protocol_ops *protocol_ops;

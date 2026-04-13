@@ -20,7 +20,7 @@ struct tcpserver_protocol_registration {
 };
 
 static const struct tcpserver_protocol_registration tcpserver_protocols[] = {
-    {TCPSERVER_PROTOCOL_LIVE, &live_stream_core1_protocol_ops},
+    {TCPSERVER_PROTOCOL_LIVE, &live_core1_protocol_ops},
     {TCPSERVER_PROTOCOL_MANAGEMENT, &management_protocol_ops},
 };
 
@@ -46,6 +46,10 @@ static void tcpserver_reset_connection_state(struct tcpserver *server) {
 static bool tcpserver_can_accept_client(const struct tcpserver *server) {
     size_t index;
 
+    if (server->err_disconnect_pending) {
+        return false;
+    }
+
     for (index = 0; index < (sizeof(tcpserver_protocols) / sizeof(tcpserver_protocols[0])); ++index) {
         const struct tcpserver_protocol_registration *registration = &tcpserver_protocols[index];
 
@@ -63,6 +67,24 @@ static bool tcpserver_can_accept_client(const struct tcpserver *server) {
 static void tcpserver_clear_stale_management_response(void) {
     if (management_shared_get_state() == MGMT_CORE_STATE_RESPONSE_READY) {
         management_shared_complete_response();
+    }
+}
+
+static void tcpserver_complete_error_disconnect(struct tcpserver *server) {
+    if (!server->err_disconnect_pending || server->client_pcb != NULL) {
+        return;
+    }
+
+    server->err_disconnect_pending = false;
+    if (server->protocol_ops != NULL) {
+        server->protocol_ops->on_disconnect(server);
+    }
+    tcpserver_reset_connection_state(server);
+    tcpserver_clear_stale_management_response();
+
+    if (server->last_error != 0) {
+        LOG("TCP", "Client disconnected with error: %d\n", server->last_error);
+        server->last_error = 0;
     }
 }
 
@@ -87,6 +109,7 @@ static err_t tcpserver_close_client(struct tcpserver *server) {
         server->client_pcb = NULL;
     }
 
+    server->err_disconnect_pending = false;
     tcpserver_reset_connection_state(server);
     tcpserver_clear_stale_management_response();
     return err;
@@ -198,14 +221,13 @@ static void tcp_server_err(void *arg, err_t err) {
         return;
     }
 
-    if (server->protocol_ops != NULL) {
-        server->protocol_ops->on_disconnect(server);
-    }
-
+    // PCB is already freed by lwip — just record the error and flag cleanup.
+    // Full disconnect (including live abort + quiescence wait) is deferred to
+    // tcpserver_run where it runs on Core 1 and can safely block on Core 0.
     server->client_pcb = NULL;
+    server->client_connected = false;
     server->last_error = err == ERR_ABRT ? 0 : err;
-    tcpserver_reset_connection_state(server);
-    tcpserver_clear_stale_management_response();
+    server->err_disconnect_pending = true;
 }
 
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err) {
@@ -261,6 +283,8 @@ static bool tcp_server_open(struct tcpserver *server) {
 }
 
 static void tcpserver_teardown(struct tcpserver *server) {
+    tcpserver_complete_error_disconnect(server);
+
     if (server->client_pcb != NULL) {
         tcpserver_close_client(server);
     }
@@ -291,6 +315,7 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
     server->mdns_netif_added = false;
     server->mdns_service_added = false;
     server->finish_requested = false;
+    server->err_disconnect_pending = false;
     server->last_error = 0;
     server->options = options != NULL ? *options
                                       : (struct tcpserver_options){
@@ -345,6 +370,8 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
         if (stop_requested != NULL && *stop_requested) {
             tcpserver_finish(server);
         }
+
+        tcpserver_complete_error_disconnect(server);
 
         if (!server->client_connected) {
             tcpserver_clear_stale_management_response();

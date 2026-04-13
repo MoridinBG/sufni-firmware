@@ -1,4 +1,4 @@
-#include "live_stream_core0.h"
+#include "live_core0_session.h"
 
 #include "calibration_flow.h"
 #include "data_acquisition.h"
@@ -348,8 +348,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
             return false;
         }
 
-        resp->accepted_gps_fix_hz =
-            live_requested_rate_or_default(req->requested_gps_fix_hz, 1, LIVE_MAX_GPS_FIX_HZ);
+        resp->accepted_gps_fix_hz = live_requested_rate_or_default(req->requested_gps_fix_hz, 1, LIVE_MAX_GPS_FIX_HZ);
         resp->gps_fix_interval_ms = 1000u / resp->accepted_gps_fix_hz;
         if (resp->gps_fix_interval_ms == 0u) {
             resp->gps_fix_interval_ms = 1u;
@@ -363,8 +362,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         }
 
         if (!gps_sensor_configure(&gps, (uint16_t)resp->gps_fix_interval_ms, true, true, true, true, false)) {
-            LOG("LIVE", "Start failed: GPS configure failed (interval=%u ms)\n",
-                (unsigned)resp->gps_fix_interval_ms);
+            LOG("LIVE", "Start failed: GPS configure failed (interval=%u ms)\n", (unsigned)resp->gps_fix_interval_ms);
             gps.power_off(&gps);
             resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
             return false;
@@ -475,6 +473,8 @@ void live_stream_core0_stop(void) {
 bool live_stream_core0_active(void) { return live_runtime.active; }
 
 void live_stream_core0_service(void) {
+    // Core 0 only advances requests to *_RESPONSE_READY
+    // Core 1 or disconnect abort owns returning the shared control state to IDLE.
     switch (live_stream_get_control_state()) {
         case LIVE_CONTROL_START_REQUESTED:
             live_stream_core0_start(&live_stream_shared.start_request, &live_stream_shared.start_response);

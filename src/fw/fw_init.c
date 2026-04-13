@@ -9,7 +9,7 @@
 #include "data_storage.h"
 #include "display.h"
 #include "helpers.h"
-#include "live_stream_core0.h"
+#include "live_core0_session.h"
 #include "sensor_setup.h"
 
 #include "../ntp/ntp.h"
