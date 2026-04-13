@@ -6,13 +6,26 @@
 
 struct tcpserver_protocol_ops;
 
+enum live_session_phase {
+    LIVE_PHASE_IDLE = 0,
+    LIVE_PHASE_STARTING,
+    LIVE_PHASE_START_HANDSHAKE,
+    LIVE_PHASE_ACTIVE,
+    LIVE_PHASE_STOPPING,
+    LIVE_PHASE_STOP_DEFERRED,
+};
+
+enum live_handshake_step {
+    LIVE_HANDSHAKE_ACK = 0,
+    LIVE_HANDSHAKE_HEADER,
+    LIVE_HANDSHAKE_STATS,
+    LIVE_HANDSHAKE_DONE,
+};
+
 struct live_protocol_session {
-    bool session_active;
-    bool start_pending;
-    bool start_ack_sent;
-    bool start_header_sent;
-    bool start_stats_sent;
-    bool stop_pending;
+    enum live_session_phase phase;
+    enum live_handshake_step handshake_step;
+    bool stop_queued;
     uint32_t tx_sequence;
     uint64_t last_stats_us;
 };

@@ -24,21 +24,20 @@ static bool live_protocol_can_accept(const struct tcpserver *server);
 static void live_protocol_on_accept(struct tcpserver *server);
 static void live_protocol_on_disconnect(struct tcpserver *server);
 static bool live_protocol_detect(const struct tcpserver *server);
-static bool live_stream_core1_process_rx(struct tcpserver *server);
-static void live_stream_core1_service(struct tcpserver *server);
-static bool live_stream_core1_needs_service(const struct tcpserver *server);
-static bool live_stream_core1_control_in_flight(const struct tcpserver *server, enum live_control_state control_state);
-static void live_stream_core1_wait_for_quiescent_control(struct tcpserver *server);
-static void live_stream_core1_abort(struct tcpserver *server);
+static bool live_protocol_process_rx(struct tcpserver *server);
+static void live_protocol_service(struct tcpserver *server);
+static bool live_protocol_needs_service(const struct tcpserver *server);
+static void live_protocol_wait_for_quiescent_control(struct tcpserver *server);
+static void live_protocol_abort(struct tcpserver *server);
 
 const struct tcpserver_protocol_ops live_core1_protocol_ops = {
     .can_accept = live_protocol_can_accept,
     .on_accept = live_protocol_on_accept,
     .on_disconnect = live_protocol_on_disconnect,
     .detect = live_protocol_detect,
-    .process_rx = live_stream_core1_process_rx,
-    .service = live_stream_core1_service,
-    .needs_service = live_stream_core1_needs_service,
+    .process_rx = live_protocol_process_rx,
+    .service = live_protocol_service,
+    .needs_service = live_protocol_needs_service,
 };
 
 static void live_reset_session(struct tcpserver *server) {
@@ -46,13 +45,6 @@ static void live_reset_session(struct tcpserver *server) {
         .tx_sequence = 1,
         .last_stats_us = time_us_64(),
     };
-}
-
-static void live_reset_start_handshake(struct tcpserver *server) {
-    server->live.start_pending = false;
-    server->live.start_ack_sent = false;
-    server->live.start_header_sent = false;
-    server->live.start_stats_sent = false;
 }
 
 static bool live_write_frame_bytes(struct tcpserver *server, const void *frame_bytes, uint32_t total_bytes) {
@@ -293,8 +285,7 @@ static bool live_send_next_ready_slot(struct tcpserver *server) {
 }
 
 static void live_queue_start_request(struct tcpserver *server, const struct live_start_request_frame *frame) {
-    if (server->live.start_pending || server->live.session_active || server->live.stop_pending ||
-        live_stream_get_control_state() != LIVE_CONTROL_IDLE) {
+    if (server->live.phase != LIVE_PHASE_IDLE || live_stream_get_control_state() != LIVE_CONTROL_IDLE) {
         live_send_error(server, LIVE_START_RESULT_BUSY);
         return;
     }
@@ -306,41 +297,40 @@ static void live_queue_start_request(struct tcpserver *server, const struct live
         .requested_imu_hz = frame->imu_hz,
         .requested_gps_fix_hz = frame->gps_fix_hz,
     };
-    server->live.start_pending = true;
-    server->live.start_ack_sent = false;
-    server->live.start_header_sent = false;
-    server->live.start_stats_sent = false;
+    server->live.phase = LIVE_PHASE_STARTING;
+    server->live.handshake_step = LIVE_HANDSHAKE_ACK;
+    server->live.stop_queued = false;
     live_stream_set_control_state(LIVE_CONTROL_START_REQUESTED);
 }
 
 static void live_queue_stop_request(struct tcpserver *server) {
-    if (server->live.start_pending) {
-        server->live.stop_pending = true;
-        return;
-    }
-
-    if (!server->live.session_active) {
-        if (server->live.stop_pending) {
+    switch (server->live.phase) {
+        case LIVE_PHASE_STARTING:
+        case LIVE_PHASE_START_HANDSHAKE:
+            server->live.stop_queued = true;
             return;
-        }
-        live_send_stop_ack(server);
-        return;
-    }
-
-    if (!server->live.stop_pending) {
-        server->live.stop_pending = true;
-        live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
+        case LIVE_PHASE_ACTIVE:
+            server->live.phase = LIVE_PHASE_STOPPING;
+            live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
+            return;
+        case LIVE_PHASE_IDLE:
+            live_send_stop_ack(server);
+            return;
+        case LIVE_PHASE_STOPPING:
+        case LIVE_PHASE_STOP_DEFERRED:
+        default:
+            return;
     }
 }
 
 static bool live_protocol_can_accept(const struct tcpserver *server) {
-    return live_stream_get_control_state() == LIVE_CONTROL_IDLE && !live_stream_shared.active &&
-           !server->live.session_active && !server->live.start_pending && !server->live.stop_pending;
+    return server->live.phase == LIVE_PHASE_IDLE && live_stream_get_control_state() == LIVE_CONTROL_IDLE &&
+           !live_stream_shared.active;
 }
 
 static void live_protocol_on_accept(struct tcpserver *server) { live_reset_session(server); }
 
-static void live_protocol_on_disconnect(struct tcpserver *server) { live_stream_core1_abort(server); }
+static void live_protocol_on_disconnect(struct tcpserver *server) { live_protocol_abort(server); }
 
 static bool live_protocol_detect(const struct tcpserver *server) {
     uint32_t magic;
@@ -353,7 +343,7 @@ static bool live_protocol_detect(const struct tcpserver *server) {
     return magic == LIVE_PROTOCOL_MAGIC;
 }
 
-static bool live_stream_core1_process_rx(struct tcpserver *server) {
+static bool live_protocol_process_rx(struct tcpserver *server) {
     while (server->rx_len >= sizeof(struct live_frame_header)) {
         struct live_frame_header header;
         uint32_t frame_bytes;
@@ -437,96 +427,136 @@ static bool live_stream_core1_process_rx(struct tcpserver *server) {
     return true;
 }
 
-static void live_stream_core1_service(struct tcpserver *server) {
-    if (server->live.start_pending && live_stream_get_control_state() == LIVE_CONTROL_START_RESPONSE_READY) {
-        if (!server->live.start_ack_sent) {
+static void live_service_starting(struct tcpserver *server) {
+    if (live_stream_get_control_state() != LIVE_CONTROL_START_RESPONSE_READY) {
+        return;
+    }
+
+    server->live.phase = LIVE_PHASE_START_HANDSHAKE;
+    server->live.handshake_step = LIVE_HANDSHAKE_ACK;
+}
+
+static void live_service_start_handshake(struct tcpserver *server) {
+    switch (server->live.handshake_step) {
+        case LIVE_HANDSHAKE_ACK:
             if (!live_send_start_ack(server)) {
                 return;
             }
-            server->live.start_ack_sent = true;
-        }
-
-        if (live_stream_shared.start_response.result == LIVE_START_RESULT_OK) {
-            if (!server->live.start_header_sent) {
-                if (!live_send_session_header(server)) {
-                    return;
+            if (live_stream_shared.start_response.result != LIVE_START_RESULT_OK) {
+                if (server->live.stop_queued) {
+                    server->live.phase = LIVE_PHASE_STOP_DEFERRED;
+                } else {
+                    server->live.phase = LIVE_PHASE_IDLE;
                 }
-                server->live.start_header_sent = true;
+                live_stream_set_control_state(LIVE_CONTROL_IDLE);
+                return;
             }
-            if (!server->live.start_stats_sent) {
-                if (!live_send_session_stats(server)) {
-                    return;
-                }
-                server->live.start_stats_sent = true;
+            server->live.handshake_step = LIVE_HANDSHAKE_HEADER;
+            return;
+        case LIVE_HANDSHAKE_HEADER:
+            if (!live_send_session_header(server)) {
+                return;
             }
-
-            if (server->live.stop_pending) {
-                live_reset_start_handshake(server);
+            server->live.handshake_step = LIVE_HANDSHAKE_STATS;
+            return;
+        case LIVE_HANDSHAKE_STATS:
+            if (!live_send_session_stats(server)) {
+                return;
+            }
+            server->live.handshake_step = LIVE_HANDSHAKE_DONE;
+            return;
+        case LIVE_HANDSHAKE_DONE:
+            if (server->live.stop_queued) {
+                server->live.stop_queued = false;
+                server->live.phase = LIVE_PHASE_STOPPING;
                 live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
                 return;
             }
-
             LOG("LIVE", "Session %u started, mask=0x%02x\n", (unsigned)live_stream_shared.start_response.session_id,
                 (unsigned)live_stream_shared.start_response.selected_sensor_mask);
-            server->live.session_active = true;
+            server->live.phase = LIVE_PHASE_ACTIVE;
+            server->live.last_stats_us = time_us_64();
+            live_stream_set_control_state(LIVE_CONTROL_IDLE);
+            return;
+    }
+}
+
+static void live_service_stopping(struct tcpserver *server) {
+    if (live_stream_get_control_state() != LIVE_CONTROL_STOP_RESPONSE_READY) {
+        return;
+    }
+
+    LOG("LIVE", "Session stopped\n");
+    if (server->client_pcb != NULL && !live_send_stop_ack(server)) {
+        return;
+    }
+    server->live.phase = LIVE_PHASE_IDLE;
+    live_stream_set_control_state(LIVE_CONTROL_IDLE);
+}
+
+static void live_service_stop_deferred(struct tcpserver *server) {
+    if (live_stream_shared.active || live_stream_get_control_state() != LIVE_CONTROL_IDLE) {
+        return;
+    }
+
+    if (server->client_pcb != NULL && !live_send_stop_ack(server)) {
+        return;
+    }
+    server->live.phase = LIVE_PHASE_IDLE;
+}
+
+static void live_service_active(struct tcpserver *server) {
+    if (server->client_pcb == NULL) {
+        return;
+    }
+
+    live_send_next_ready_slot(server);
+    if ((time_us_64() - server->live.last_stats_us) >= 500000u) {
+        if (live_send_session_stats(server)) {
             server->live.last_stats_us = time_us_64();
         }
-
-        live_reset_start_handshake(server);
-        live_stream_set_control_state(LIVE_CONTROL_IDLE);
-    }
-
-    if (server->live.stop_pending && live_stream_get_control_state() == LIVE_CONTROL_STOP_RESPONSE_READY) {
-        LOG("LIVE", "Session stopped\n");
-        if (server->client_pcb != NULL && !live_send_stop_ack(server)) {
-            return;
-        }
-        server->live.start_pending = false;
-        server->live.session_active = false;
-        server->live.stop_pending = false;
-        live_stream_set_control_state(LIVE_CONTROL_IDLE);
-    }
-
-    if (server->live.stop_pending && !server->live.start_pending && !server->live.session_active &&
-        !live_stream_shared.active && live_stream_get_control_state() == LIVE_CONTROL_IDLE) {
-        if (server->client_pcb != NULL && !live_send_stop_ack(server)) {
-            return;
-        }
-        server->live.stop_pending = false;
-    }
-
-    if (server->live.session_active && server->client_pcb != NULL) {
-        live_send_next_ready_slot(server);
-        if ((time_us_64() - server->live.last_stats_us) >= 500000u) {
-            if (live_send_session_stats(server)) {
-                server->live.last_stats_us = time_us_64();
-            }
-        }
     }
 }
 
-static bool live_stream_core1_needs_service(const struct tcpserver *server) {
-    return server->live.start_pending || server->live.session_active || server->live.stop_pending;
+static void live_protocol_service(struct tcpserver *server) {
+    switch (server->live.phase) {
+        case LIVE_PHASE_STARTING:
+            live_service_starting(server);
+            break;
+        case LIVE_PHASE_START_HANDSHAKE:
+            live_service_start_handshake(server);
+            break;
+        case LIVE_PHASE_ACTIVE:
+            live_service_active(server);
+            break;
+        case LIVE_PHASE_STOPPING:
+            live_service_stopping(server);
+            break;
+        case LIVE_PHASE_STOP_DEFERRED:
+            live_service_stop_deferred(server);
+            break;
+        default:
+            break;
+    }
 }
 
-static bool live_stream_core1_control_in_flight(const struct tcpserver *server, enum live_control_state control_state) {
-    return server->live.start_pending || server->live.session_active || server->live.stop_pending ||
-           live_stream_shared.active || control_state != LIVE_CONTROL_IDLE;
+static bool live_protocol_needs_service(const struct tcpserver *server) {
+    return server->live.phase != LIVE_PHASE_IDLE;
 }
 
-static void live_stream_core1_wait_for_quiescent_control(struct tcpserver *server) {
-    enum live_control_state control_state;
+static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
+    enum live_control_state cs;
 
     // Disconnect cleanup must not return until the shared live control state is quiescent.
     // tcpserver_reset_connection_state() wipes the local session flags immediately after.
     for (;;) {
-        control_state = live_stream_get_control_state();
+        cs = live_stream_get_control_state();
 
-        if (control_state == LIVE_CONTROL_STOP_RESPONSE_READY) {
+        if (cs == LIVE_CONTROL_STOP_RESPONSE_READY) {
             live_stream_set_control_state(LIVE_CONTROL_IDLE);
             break;
         }
-        if (control_state == LIVE_CONTROL_START_RESPONSE_READY) {
+        if (cs == LIVE_CONTROL_START_RESPONSE_READY) {
             live_stream_set_control_state(LIVE_CONTROL_IDLE);
             if (live_stream_shared.active) {
                 live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
@@ -534,12 +564,12 @@ static void live_stream_core1_wait_for_quiescent_control(struct tcpserver *serve
             }
             break;
         }
-        if (control_state == LIVE_CONTROL_IDLE) {
+        if (cs == LIVE_CONTROL_IDLE) {
             if (!live_stream_shared.active) {
                 break;
             }
             live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
-        } else if (control_state == LIVE_CONTROL_START_REQUESTED) {
+        } else if (cs == LIVE_CONTROL_START_REQUESTED) {
             live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
         }
 
@@ -547,20 +577,18 @@ static void live_stream_core1_wait_for_quiescent_control(struct tcpserver *serve
     }
 }
 
-static void live_stream_core1_abort(struct tcpserver *server) {
-    enum live_control_state control_state = live_stream_get_control_state();
+static void live_protocol_abort(struct tcpserver *server) {
+    enum live_control_state cs = live_stream_get_control_state();
 
-    if (!live_stream_core1_control_in_flight(server, control_state)) {
+    if (server->live.phase == LIVE_PHASE_IDLE && !live_stream_shared.active && cs == LIVE_CONTROL_IDLE) {
         return;
     }
 
-    LOG("LIVE", "Aborting session (active=%d, start_pending=%d, stop_pending=%d)\n", server->live.session_active,
-        server->live.start_pending, server->live.stop_pending);
+    LOG("LIVE", "Aborting session (phase=%d, stop_queued=%d)\n", (int)server->live.phase, server->live.stop_queued);
 
-    live_reset_start_handshake(server);
-    server->live.session_active = live_stream_shared.active;
-    server->live.stop_pending = true;
-    live_stream_core1_wait_for_quiescent_control(server);
+    server->live.phase = LIVE_PHASE_STOPPING;
+    server->live.stop_queued = false;
+    live_protocol_wait_for_quiescent_control(server);
 
     LOG("LIVE", "Abort complete\n");
 }

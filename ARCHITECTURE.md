@@ -32,7 +32,7 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 | `data_storage.c` / `data_storage.h`             | Core 1 storage session backend (`storage_session_run`), SST file creation, chunk serialization, and file close              |
 | `data_sync.c` / `data_sync.h`                   | WiFi upload workflow for recorded SST files via TCP client                                                                  |
 | `live_stream_shared.c` / `live_stream_shared.h` | Shared live session state, slot pools, queue counters, and control state used by both cores                                 |
-| `live_stream_core0.c` / `live_stream_core0.h`   | Core 0 live-preview session start or stop, negotiated timers, GPS live routing, slot filling, and drop accounting           |
+| `live_core0_session.c` / `live_core0_session.h` | Core 0 live-preview session start or stop, negotiated timers, GPS live routing, slot filling, and drop accounting           |
 | `management_shared.c` / `management_shared.h`   | Cross-core management request/response state for config apply and time set                                                  |
 
 `src/net/`:
@@ -41,7 +41,7 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `tcpserver.c` / `tcpserver.h`                   | Core 1-owned TCP server: connection lifecycle, protocol detection, dispatch to protocol handlers                            |
 | `live_protocol.h`                               | Versioned wire format for live preview: frame header, session metadata, batch payloads, stats                               |
-| `live_stream_core1.c` / `live_stream_core1.h`   | Core 1 live protocol handler: request processing, frame emission, slot draining, teardown, and session stats                |
+| `live_core1_protocol.c` / `live_core1_protocol.h` | Core 1 live protocol handler: request processing, frame emission, slot draining, teardown, and session stats              |
 | `management_protocol.c` / `management_protocol.h` | Core 1 management protocol handler: file listing, download, trash, config upload, time update                             |
 | `tcpclient.c` / `tcpclient.h`                   | TCP client for pushing SST files to a remote server in `SYNC_DATA`                                                          |
 | `wifi.c` / `wifi.h`                             | WiFi lifecycle: STA or AP mode start from config, stop, mode query                                                          |
