@@ -552,6 +552,10 @@ static void management_service_trash_file(struct tcpserver *server) {
     management_begin_action_result(session, session->active_request_id, MGMT_RESULT_OK);
 }
 
+// Two-phase handshake with Core 0 via management_shared:
+// Phase 1: wait for shared state to reach IDLE, then publish request.
+// Phase 2: wait for Core 0 to set RESPONSE_READY, then harvest result.
+// Drains any stale response from a prior disconnected session before publishing.
 static void management_service_wait_core_response(struct tcpserver *server) {
     struct management_session *session = &server->management;
 

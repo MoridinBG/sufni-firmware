@@ -43,7 +43,7 @@ add_executable(sufni-suspension-telemetry
     src/fw/helpers.c
     src/fw/management_shared.c
     src/fw/live_stream_shared.c
-    src/fw/live_stream_core0.c
+    src/fw/live_core0_session.c
     src/fw/sensor_setup.c
     src/fw/state_views.c
     src/fw/calibration_storage.c
@@ -54,7 +54,7 @@ add_executable(sufni-suspension-telemetry
     src/net/tcpclient.c
     src/net/tcpserver.c
     src/net/wifi.c
-    src/net/live_stream_core1.c
+    src/net/live_core1_protocol.c
     src/net/management_protocol.c
     src/ntp/ntp.c
     src/pio_i2c/pio_i2c.c

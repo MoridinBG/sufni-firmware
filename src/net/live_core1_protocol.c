@@ -192,6 +192,8 @@ static bool live_send_session_stats(struct tcpserver *server) {
     return true;
 }
 
+// Atomically claim the oldest READY slot for sending. Returns -1 if none available.
+// Core 0 owns FREE→FILLING→READY; this side owns READY→SENDING→FREE.
 static int live_claim_oldest_ready_slot(void *base, size_t stride, uint32_t slot_count) {
     uint32_t slot_index;
     uint32_t oldest_sequence = UINT32_MAX;
@@ -248,6 +250,7 @@ static bool live_send_slot_frame(struct tcpserver *server, uint16_t frame_type, 
     }
 
     if (!live_write_frame_bytes(server, live_tx_frame_buffer, total_bytes)) {
+        // Send buffer full — return slot to READY so Core 0 doesn't lose it.
         __atomic_store_n(&header->state, LIVE_SLOT_READY, __ATOMIC_RELEASE);
         return false;
     }
@@ -466,6 +469,7 @@ static void live_service_start_handshake(struct tcpserver *server) {
             server->live.handshake_step = LIVE_HANDSHAKE_DONE;
             return;
         case LIVE_HANDSHAKE_DONE:
+            // STOP_LIVE arrived while we were sending ACK/HEADER/STATS — skip ACTIVE.
             if (server->live.stop_queued) {
                 server->live.stop_queued = false;
                 server->live.phase = LIVE_PHASE_STOPPING;
@@ -557,6 +561,8 @@ static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
             break;
         }
         if (cs == LIVE_CONTROL_START_RESPONSE_READY) {
+            // Core 0 finished a start we tried to override with STOP_REQUESTED.
+            // Acknowledge it, then re-request stop if a session was actually started.
             live_stream_set_control_state(LIVE_CONTROL_IDLE);
             if (live_stream_shared.active) {
                 live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
@@ -568,8 +574,10 @@ static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
             if (!live_stream_shared.active) {
                 break;
             }
+            // Session is running but no stop was requested yet (e.g. disconnect mid-handshake).
             live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
         } else if (cs == LIVE_CONTROL_START_REQUESTED) {
+            // Core 0 hasn't seen the start yet — overwrite with stop.
             live_stream_set_control_state(LIVE_CONTROL_STOP_REQUESTED);
         }
 
@@ -577,6 +585,8 @@ static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
     }
 }
 
+// Called from on_disconnect, always on Core 1 (never from tcp_server_err ISR —
+// that path defers via err_disconnect_pending). Safe to spin-wait on Core 0.
 static void live_protocol_abort(struct tcpserver *server) {
     enum live_control_state cs = live_stream_get_control_state();
 

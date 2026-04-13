@@ -70,6 +70,7 @@ static err_t tcp_client_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     return ERR_OK;
 }
 
+// lwip poll fires after POLL_TIME_S of inactivity — treat as timeout.
 static err_t tcp_client_poll(void *arg, struct tcp_pcb *tpcb) { return tcpclient_finish_with_status(arg, -1); }
 
 static void tcp_client_err(void *arg, err_t err) {
@@ -95,6 +96,7 @@ err_t tcp_client_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err
     if (p->tot_len > 0) {
         tcp_recved(tpcb, p->tot_len);
 
+        // Walk the full pbuf chain — status byte may land in any segment.
         for (segment = p; segment != NULL; segment = segment->next) {
             const int8_t *status_bytes = (const int8_t *)segment->payload;
             u16_t index;
@@ -258,7 +260,8 @@ bool send_file(const char *filename) {
             total_read += br;
         }
 
-        // Write data to TCP stream
+        // tcp_write may fail if sndbuf drained between the check and the write.
+        // On failure, retry with the same buffer contents on the next iteration.
         cyw43_arch_lwip_begin();
         err_t err = tcp_write(conn->pcb, buffer, br,
                               TCP_WRITE_FLAG_COPY | (total_read < finfo.fsize ? TCP_WRITE_FLAG_MORE : 0));

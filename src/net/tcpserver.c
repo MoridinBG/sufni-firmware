@@ -70,6 +70,7 @@ static void tcpserver_clear_stale_management_response(void) {
     }
 }
 
+// Finish a disconnect that tcp_server_err could only flag (ISR context).
 static void tcpserver_complete_error_disconnect(struct tcpserver *server) {
     if (!server->err_disconnect_pending || server->client_pcb != NULL) {
         return;
@@ -109,12 +110,15 @@ static err_t tcpserver_close_client(struct tcpserver *server) {
         server->client_pcb = NULL;
     }
 
+    // Clear the flag in case tcp_server_err raced with this close path.
     server->err_disconnect_pending = false;
     tcpserver_reset_connection_state(server);
     tcpserver_clear_stale_management_response();
     return err;
 }
 
+// Match the first 4 RX bytes against registered protocol magics.
+// No-op once protocol_ops is set. Returns false to reject the connection.
 static bool tcpserver_select_protocol(struct tcpserver *server) {
     size_t index;
 
