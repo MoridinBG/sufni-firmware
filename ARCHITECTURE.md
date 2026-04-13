@@ -11,12 +11,15 @@ Core 0                                      FIFO + Shared RAM                   
 │ Sensor sampling timers     │<──────────── buffer acks / events ─────────│ Storage backend            │
 │ GPS parsing + calibration  │                                             │ TCP server backend         │
 │ Display / buttons / WiFi   │══ live session state + slot pools ════════>│ Live framing + lwIP send   │
+│ Management request service │══ management shared state ═══════════════>│ Management protocol        │
 └────────────────────────────┘                                             └────────────────────────────┘
 ```
 
-The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, sensor sampling via repeating timer callbacks, GPS UART processing, display, buttons, calibration application, and WiFi connect or disconnect lifecycle. Core 1 now runs a dispatcher that can enter either a storage session backend or a TCP server backend. The two cores use the Pico's hardware multicore FIFO as a control mailbox and use shared RAM for live-preview batch transport.
+The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, sensor sampling via repeating timer callbacks, GPS UART processing, display, buttons, calibration application, WiFi connect/disconnect lifecycle, and servicing management requests (config apply, time set). Core 1 runs a dispatcher that can enter either a storage session backend or a TCP server backend. The TCP server multiplexes two framed protocols on the same port: a live preview protocol for real-time sensor streaming and a management protocol for file operations, config upload, and time synchronization. The two cores use the Pico's hardware multicore FIFO as a control mailbox and use shared RAM for live-preview batch transport and management request/response exchange.
 
 ## Firmware module layout
+
+`src/fw/`:
 
 | Module                                          | Responsibility                                                                                                              |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -27,16 +30,32 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 | `core1_worker.c` / `core1_worker.h`             | Core 1 dispatcher, backend mode selection, stop requests, and status tracking                                               |
 | `data_acquisition.c` / `data_acquisition.h`     | Core 0 recording timers, acquisition buffers, GPS wait/record callbacks, marker flushing, and storage-session FIFO commands |
 | `data_storage.c` / `data_storage.h`             | Core 1 storage session backend (`storage_session_run`), SST file creation, chunk serialization, and file close              |
-| `data_sync.c` / `data_sync.h`                   | WiFi upload workflow for recorded SST files                                                                                 |
+| `data_sync.c` / `data_sync.h`                   | WiFi upload workflow for recorded SST files via TCP client                                                                  |
 | `live_stream_shared.c` / `live_stream_shared.h` | Shared live session state, slot pools, queue counters, and control state used by both cores                                 |
 | `live_stream_core0.c` / `live_stream_core0.h`   | Core 0 live-preview session start or stop, negotiated timers, GPS live routing, slot filling, and drop accounting           |
-| `tcpserver.c` / `tcpserver.h`                   | Core 1-owned TCP backend that multiplexes file serving and the live protocol                                                |
-| `live_stream_core1.c` / `live_stream_core1.h`   | Core 1 live control handling, frame emission, slot draining, teardown, and session stats                                    |
-| `live_protocol.h`                               | Versioned wire format for live preview control, session metadata, batches, and stats                                        |
+| `management_shared.c` / `management_shared.h`   | Cross-core management request/response state for config apply and time set                                                  |
+
+`src/net/`:
+
+| Module                                          | Responsibility                                                                                                              |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `tcpserver.c` / `tcpserver.h`                   | Core 1-owned TCP server: connection lifecycle, protocol detection, dispatch to protocol handlers                            |
+| `live_protocol.h`                               | Versioned wire format for live preview: frame header, session metadata, batch payloads, stats                               |
+| `live_stream_core1.c` / `live_stream_core1.h`   | Core 1 live protocol handler: request processing, frame emission, slot draining, teardown, and session stats                |
+| `management_protocol.c` / `management_protocol.h` | Core 1 management protocol handler: file listing, download, trash, config upload, time update                             |
+| `tcpclient.c` / `tcpclient.h`                   | TCP client for pushing SST files to a remote server in `SYNC_DATA`                                                          |
+| `wifi.c` / `wifi.h`                             | WiFi lifecycle: STA or AP mode start from config, stop, mode query                                                          |
+
+Other modules:
+
+| Module                                          | Responsibility                                                                                                              |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `state_views.c` / `state_views.h`               | State-specific rendering for `IDLE` and `GPS_WAIT` screens                                                                  |
 | `sensor_setup.c` / `sensor_setup.h`             | Compile-time-selected global GPS/IMU sensor instances                                                                       |
 | `display.c` / `display.h`                       | Display setup and single-message helper                                                                                     |
 | `helpers.c` / `helpers.h`                       | Shared runtime helpers such as WiFi, USB, battery, and reset helpers                                                        |
+| `sst.c` / `sst.h`                               | SST binary format structs, chunk type definitions, and helpers (source of truth for the format)                             |
+| `config.c` / `config.h`                         | CONFIG file parsing, staging, validation, snapshot application                                                               |
 
 ## State machine
 
@@ -52,7 +71,7 @@ The main loop in `src/fw/main.c` dispatches to a handler function indexed by the
 | `RECORD`    | After REC_START/GPS_WAIT       | Active data acquisition. Repeating timer callbacks sample sensors into buffers while the main loop idles in the `RECORD` slot.                              |
 | `REC_STOP`  | Left press in RECORD           | Stops timers, flushes remaining data, closes file.                                                                                                          |
 | `SYNC_DATA` | Left long-press in IDLE        | Connects WiFi, pushes all SST files to configured server via TCP client, moves to `uploaded/`.                                                              |
-| `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves either the file protocol or live preview. |
+| `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves either the management protocol or live preview. |
 | `MSC`       | USB cable detected at boot     | USB Mass Storage mode. SD card exposed directly to host. Mutually exclusive with normal operation.                                                          |
 
 Button mapping:
@@ -64,7 +83,7 @@ Button mapping:
 
 ## Core 1 dispatcher
 
-`fw_init.c` launches `core1_worker_main()` on Core 1 during boot. Core 1 no longer runs a permanent SD writer loop. Instead it sits in `CORE1_MODE_IDLE` until Core 0 requests a backend.
+`fw_init.c` launches `core1_worker_main()` on Core 1 during boot. Core 1 sits in `CORE1_MODE_IDLE` until Core 0 requests a backend.
 
 Dispatcher modes:
 
@@ -90,25 +109,25 @@ Live-preview bulk sample transport does not use the FIFO. The FIFO is reserved f
 
 ## Data pipeline
 
-There are now two cross-core data paths:
+There are two cross-core data paths:
 
 - recording to SST files through the storage backend
 - live preview over TCP through shared slot pools plus the TCP backend
 
 ### FIFO control mailbox
 
-The multicore FIFO is now a control mailbox. The first FIFO word encodes a message family and command ID, so dispatcher traffic and storage traffic cannot be misinterpreted.
+The multicore FIFO is a control mailbox. The first FIFO word encodes a message family and command ID, so dispatcher traffic and storage traffic cannot be misinterpreted.
 
 The FIFO carries:
 
 - dispatcher mode requests and backend-ready or completion events
 - recording storage commands and returned-buffer acknowledgements
 
-The FIFO does not carry live sample payloads.
+The FIFO does not carry live sample payloads or management requests.
 
 ### Recording pipeline
 
-Core 0 recording acquisition still lives in `data_acquisition.c`, and Core 1 storage still lives in `data_storage.c`. The main behavioral change is that recording explicitly enters storage mode first.
+Core 0 recording acquisition lives in `data_acquisition.c`, and Core 1 storage lives in `data_storage.c`. Recording explicitly enters storage mode first.
 
 ### Double-buffer scheme
 
@@ -147,7 +166,7 @@ The lifecycle is:
 
 1. Core 0 connects WiFi and requests `CORE1_MODE_TCP_SERVER`.
 2. Core 1 brings up the TCP backend and accepts a single client.
-3. The client either speaks the file protocol or sends a live protocol frame with `LIVE_PROTOCOL_MAGIC`.
+3. The client sends a frame with `LIVE_PROTOCOL_MAGIC` (`0x4556494C`). The TCP server detects the magic and routes all subsequent traffic to the live protocol handler.
 4. For `LIVE_FRAME_START_LIVE`, Core 1 writes a shared `live_start_request` and marks the shared control state as start-requested.
 5. Core 0 services that request from the `SERVE_TCP` loop, refreshes stored calibration for the active travel and IMU sensors, negotiates the requested rates, powers or configures GPS if needed, and arms preview timers.
 6. Core 0 batches travel, IMU, and GPS records into shared slot pools and marks completed slots `READY`.
@@ -303,7 +322,7 @@ Triggered on boot if the `CALIBRATION` file is missing or left button is held:
 
 ### WiFi
 
-Uses the CYW43 WiFi chip on Pico W / Pico 2 W. Configuration (SSID, PSK, country, NTP server, etc.) is read from a `CONFIG` file on the SD card (key=value format).
+Uses the CYW43 WiFi chip on Pico W / Pico 2 W. Supports both STA (station) and AP (access point) modes, selected by the `wifi_mode` field in the `CONFIG` file. In STA mode the device joins an existing network; in AP mode it creates its own network with a configurable SSID and PSK plus a built-in DHCP server. Configuration (SSID, PSK, country, NTP server, etc.) is read from a `CONFIG` file on the SD card (key=value format).
 
 ### NTP time sync
 
@@ -311,32 +330,136 @@ On WiFi connect, syncs time from a configurable NTP server via SNTP. Updates bot
 
 ### TCP client (data sync)
 
-`sync_recorded_data()` in `src/fw/data_sync.c` connects to a configured server (`sst_server:sst_server_port`), pushes each SST file with a header containing board ID + file size + filename, and moves successfully sent files to `uploaded/`.
+`send_file()` in `src/net/tcpclient.c` connects to a configured server (`sst_server:sst_server_port`), pushes each SST file with a header containing board ID + file size + filename, and moves successfully sent files to `uploaded/`.
 
 ### TCP server (remote access and live preview)
 
-The TCP backend listens on port 1557 with mDNS service `_gosst._tcp`. Core 1 owns the server loop while Core 0 remains in the `SERVE_TCP` state handler.
+The TCP server listens on port 1557 with mDNS service `_gosst._tcp`. Core 1 owns the server loop while Core 0 remains in the `SERVE_TCP` state handler.
 
-The backend supports two protocol modes on the same socket:
+The server uses a pluggable protocol handler architecture. On each new connection, the first bytes are matched against registered protocol detectors. Two protocols are supported:
 
-- **File protocol**: the pre-existing integer-based directory listing, download, and trash operations.
-- **Live preview protocol**: a framed binary protocol selected when the first 4 bytes on the connection match `LIVE_PROTOCOL_MAGIC`.
+- **Management protocol**: a framed request/response protocol for file management, config upload, and time synchronization. Selected when the first 4 bytes match `MANAGEMENT_PROTOCOL_MAGIC` (`0x544D474D`).
+- **Live preview protocol**: a framed binary protocol for real-time sensor streaming. Selected when the first 4 bytes match `LIVE_PROTOCOL_MAGIC` (`0x4556494C`).
 
-File-serving operations remain:
+If no magic matches after 4 bytes, the connection is rejected. Only one client is supported at a time.
 
-- **Directory listing** (file ID 0): Returns board ID, sample rate, and metadata (name, size, timestamp) for all SST files.
-- **File download** (file ID > 0): Streams the requested SST file, then moves it to `uploaded/`.
-- **File trash** (file ID < 0): Moves the file to `trash/`.
+Each protocol registers a `struct tcpserver_protocol_ops` with function pointers for `can_accept`, `on_accept`, `on_disconnect`, `detect`, `process_rx`, `service`, and `needs_service`. The TCP server core (`tcpserver.c`) handles connection lifecycle, buffering, and dispatch without knowing protocol internals.
 
-The live preview protocol uses explicit length-prefixed frames:
+#### Management protocol
 
-- client frames: `LIVE_FRAME_START_LIVE`, `LIVE_FRAME_STOP_LIVE`, `LIVE_FRAME_PING`
-- server control frames: `LIVE_FRAME_START_LIVE_ACK`, `LIVE_FRAME_STOP_LIVE_ACK`, `LIVE_FRAME_ERROR`, `LIVE_FRAME_PONG`
-- server metadata or data frames: `LIVE_FRAME_SESSION_HEADER`, `LIVE_FRAME_TRAVEL_BATCH`, `LIVE_FRAME_IMU_BATCH`, `LIVE_FRAME_GPS_BATCH`, `LIVE_FRAME_SESSION_STATS`
+The management protocol (`management_protocol.c`) provides structured access to the device's files and configuration. All frames use a 16-byte header:
 
-`LIVE_FRAME_SESSION_HEADER` returns the accepted rates, exact realized periods or intervals, session timestamps, active IMU mask and scale factors, queue capacities, and session flags. Batch frames carry stream-local sequence numbers, the first sample index and monotonic timestamp, sample counts, queue depth snapshots, and dropped-batch counters so the desktop can reconstruct timing without using packet arrival timestamps.
+| Offset | Size | Field            | Description                      |
+| ------ | ---- | ---------------- | -------------------------------- |
+| 0      | 4    | `magic`          | `0x544D474D` ("MGMT")            |
+| 4      | 2    | `version`        | Currently `1`                    |
+| 6      | 2    | `frame_type`     | `management_frame_type` enum     |
+| 8      | 4    | `request_id`     | Client-assigned correlation ID   |
+| 12     | 4    | `payload_length` | Payload bytes following header   |
 
-Only one client is supported at a time. Live preview teardown is serialized so a disconnected live session cannot leave shared control state behind for the next client.
+Request frame types:
+
+| Frame             | ID | Payload                                        | Description                                         |
+| ----------------- | -- | ---------------------------------------------- | --------------------------------------------------- |
+| `LIST_DIR_REQ`    | 1  | `{uint16_t dir_id, uint16_t reserved}`         | List files in a directory                           |
+| `GET_FILE_REQ`    | 2  | `{uint16_t file_class, uint16_t reserved, int32_t record_id}` | Download a file                       |
+| `TRASH_FILE_REQ`  | 3  | `{int32_t record_id}`                          | Move a recording to `trash/`                        |
+| `PUT_FILE_BEGIN`   | 4  | `{uint16_t file_class, uint16_t reserved, uint64_t file_size}` | Begin uploading a file               |
+| `PUT_FILE_CHUNK`   | 5  | Raw file bytes (up to 512)                     | Upload chunk (no per-chunk acknowledgement)         |
+| `PUT_FILE_COMMIT`  | 6  | (none)                                         | Finalize upload, validate and apply                 |
+| `SET_TIME_REQ`    | 7  | `{uint32_t utc_seconds, uint32_t micros}`      | Set device time                                     |
+| `PING`            | 8  | (none)                                         | Keepalive                                           |
+
+Response frame types:
+
+| Frame             | ID | Payload                                        | Description                                         |
+| ----------------- | -- | ---------------------------------------------- | --------------------------------------------------- |
+| `LIST_DIR_ENTRY`  | 16 | Directory entry struct (see below)             | One entry per file                                  |
+| `LIST_DIR_DONE`   | 17 | `{uint32_t entry_count}`                       | End of listing                                      |
+| `FILE_BEGIN`      | 18 | `{uint16_t file_class, uint16_t reserved, int32_t record_id, uint64_t file_size, char name[12]}` | File download starting |
+| `FILE_CHUNK`      | 19 | Raw file bytes (up to 512)                     | Download chunk                                      |
+| `FILE_END`        | 20 | (none)                                         | Download complete                                   |
+| `ACTION_RESULT`   | 21 | `{int32_t result_code}`                        | Success/failure for mutating operations             |
+| `ERROR`           | 22 | `{int32_t error_code}`                         | Protocol-level error                                |
+| `PONG`            | 23 | (none)                                         | Keepalive response                                  |
+
+Directory listing entries include file metadata:
+
+```c
+struct management_list_dir_entry_frame {
+    uint16_t dir_id;
+    uint16_t file_class;
+    int32_t record_id;
+    uint64_t file_size;
+    int64_t timestamp_utc;
+    uint32_t duration_ms;
+    uint8_t sst_version;
+    char name[12];
+} __attribute__((packed));
+```
+
+Directories: `MGMT_DIR_ROOT` (1) lists CONFIG + root SST files, `MGMT_DIR_UPLOADED` (2) lists `uploaded/` SSTs, `MGMT_DIR_TRASH` (3) lists `trash/` SSTs.
+
+File classes: `MGMT_FILE_CONFIG` (1, upload only), `MGMT_FILE_ROOT_SST` (2), `MGMT_FILE_UPLOADED_SST` (3), `MGMT_FILE_TRASH_SST` (4).
+
+Result codes: `OK` (0), `INVALID_REQUEST` (-1), `NOT_FOUND` (-2), `BUSY` (-3), `IO_ERROR` (-4), `VALIDATION_ERROR` (-5), `UNSUPPORTED_TARGET` (-6), `INTERNAL_ERROR` (-7).
+
+**Config upload flow**: The client sends `PUT_FILE_BEGIN` with `MGMT_FILE_CONFIG` and the file size, then `PUT_FILE_CHUNK` frames with the raw config data, and finally `PUT_FILE_COMMIT`. The server writes chunks to a staging file (`CONFIG.TMP`), then validates the staged config into a snapshot struct. The request is forwarded to Core 0 via `management_shared` with `MGMT_CORE_CMD_APPLY_CONFIG`. Core 0 applies the config and publishes back a result code. The server returns `ACTION_RESULT` with the final status.
+
+**Time update flow**: `SET_TIME_REQ` is forwarded to Core 0 via `management_shared` with `MGMT_CORE_CMD_SET_TIME`. Core 0 updates the system time and the DS3231 RTC.
+
+**Cross-core communication**: Management operations that require Core 0 action (config apply, time set) use `management_shared.h`. Core 1 publishes a request (`MGMT_CORE_STATE_REQUEST_READY`), Core 0 processes it and publishes a response (`MGMT_CORE_STATE_RESPONSE_READY`), then Core 1 acknowledges and returns to idle. Memory barriers (`__dmb()`) guard all state transitions.
+
+#### Live preview protocol
+
+The live preview protocol uses a 16-byte frame header:
+
+| Offset | Size | Field            | Description                      |
+| ------ | ---- | ---------------- | -------------------------------- |
+| 0      | 4    | `magic`          | `0x4556494C` ("LIVE")            |
+| 4      | 2    | `version`        | Currently `1`                    |
+| 6      | 2    | `frame_type`     | `live_frame_type` enum           |
+| 8      | 4    | `payload_length` | Payload bytes following header   |
+| 12     | 4    | `sequence`       | Per-frame sequence counter       |
+
+Client request frames:
+
+| Frame          | ID | Payload                                                    |
+| -------------- | -- | ---------------------------------------------------------- |
+| `START_LIVE`   | 1  | `{uint32_t sensor_mask, uint32_t travel_hz, uint32_t imu_hz, uint32_t gps_fix_hz}` |
+| `STOP_LIVE`    | 2  | (none)                                                     |
+| `PING`         | 3  | (none)                                                     |
+| `IDENTIFY`     | 4  | (none)                                                     |
+
+Server control frames:
+
+| Frame             | ID | Payload                                                    |
+| ----------------- | -- | ---------------------------------------------------------- |
+| `START_LIVE_ACK`  | 16 | `{int32_t result, uint32_t session_id, uint32_t selected_sensor_mask}` |
+| `STOP_LIVE_ACK`   | 17 | `{uint32_t session_id}`                                    |
+| `ERROR`           | 18 | `{int32_t error_code}`                                     |
+| `PONG`            | 19 | (none)                                                     |
+| `SESSION_HEADER`  | 20 | Session metadata (see below)                               |
+| `IDENTIFY_ACK`    | 21 | `{uint8_t board_id[8]}`                                    |
+
+Server data frames:
+
+| Frame            | ID | Payload                                                    |
+| ---------------- | -- | ---------------------------------------------------------- |
+| `TRAVEL_BATCH`   | 32 | Batch header + `travel_record[]`                           |
+| `IMU_BATCH`      | 33 | Batch header + `imu_record[]`                              |
+| `GPS_BATCH`      | 34 | Batch header + `gps_record[]`                              |
+| `SESSION_STATS`  | 48 | Per-stream queue depths and dropped-batch counters         |
+
+`SESSION_HEADER` returns the accepted rates, session timestamps, active IMU mask and scale factors, and session flags. The frame type of batch frames implicitly identifies the stream type. Batch frames carry a 28-byte payload header with stream-local sequence number, first sample index and monotonic timestamp, and sample count. The desktop can reconstruct timing from these fields without relying on packet arrival timestamps.
+
+Sensor mask bits: `TRAVEL` (0x01), `IMU` (0x02), `GPS` (0x04).
+
+Session flags: `CALIBRATED_ONLY` (0x01), `MUTUALLY_EXCLUSIVE_WITH_RECORDING` (0x02).
+
+Start result codes: `OK` (0), `INVALID_REQUEST` (-1), `BUSY` (-2), `UNAVAILABLE` (-3), `INTERNAL_ERROR` (-4).
+
+Live preview teardown is serialized so a disconnected live session cannot leave shared control state behind for the next client.
 
 ### USB Mass Storage (MSC)
 
@@ -403,7 +526,8 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 
 ```
 /
-├── CONFIG              Key=value config (SSID, PSK, NTP_SERVER, SST_SERVER, etc.)
+├── CONFIG              Key=value config (wifi_mode, SSID, PSK, NTP_SERVER, SST_SERVER, etc.)
+├── CONFIG.TMP          Staging file during management config upload (temporary)
 ├── CALIBRATION         Binary calibration data (travel + IMU)
 ├── BOARDID             Board unique ID string
 ├── INDEX               2-byte binary file counter
@@ -412,5 +536,5 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 ├── 00002.SST
 ├── ...
 ├── uploaded/           Successfully synced files moved here
-└── trash/              Files trashed via TCP server moved here
+└── trash/              Files trashed via management protocol moved here
 ```
