@@ -334,7 +334,7 @@ On WiFi connect, syncs time from a configurable NTP server via SNTP. Updates bot
 
 ### TCP server (remote access and live preview)
 
-The TCP server listens on port 1557 with mDNS service `_gosst._tcp`. Core 1 owns the server loop while Core 0 remains in the `SERVE_TCP` state handler.
+The TCP server listens on port 1557 with mDNS service `_gosst._tcp`. The mDNS TXT record includes `bid=<hex>` with the board's unique ID (`pico_unique_board_id_t`), allowing clients to distinguish multiple boards on the same network. Core 1 owns the server loop while Core 0 remains in the `SERVE_TCP` state handler.
 
 The server uses a pluggable protocol handler architecture. On each new connection, the first bytes are matched against registered protocol detectors. Two protocols are supported:
 
@@ -538,3 +538,24 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 ├── uploaded/           Successfully synced files moved here
 └── trash/              Files trashed via management protocol moved here
 ```
+
+### CONFIG file format
+
+The `CONFIG` file is a plain-text `key=value` file (one entry per line, `=` delimiter). Unrecognized keys are ignored; missing keys retain their defaults. Parsed by `config_load_file()` in `src/util/config.c`.
+
+| Key | Default | Max size | Description |
+|---|---|---|---|
+| `WIFI_MODE` | `STA` | enum | WiFi mode: `STA` (join existing network) or `AP` (create access point) |
+| `STA_SSID` | `sst` | 33 bytes | SSID for station mode (also accepted as `SSID` for backwards compatibility) |
+| `STA_PSK` | `changemeplease` | 64 bytes | Password for station mode (also accepted as `PSK`) |
+| `AP_SSID` | `SufniDAQ` | 33 bytes | SSID when in AP mode |
+| `AP_PSK` | `changemeplease` | 64 bytes | Password when in AP mode (minimum 8 characters) |
+| `NTP_SERVER` | `pool.ntp.org` | 264 bytes | NTP server hostname for time sync |
+| `SST_SERVER` | `sst.sghctoma.com` | 264 bytes | Server hostname for SST file upload |
+| `SST_SERVER_PORT` | `557` | uint16 | Server port for SST file upload |
+| `COUNTRY` | `HU` | uint32 | 2-letter country code for WiFi regulatory domain (maps to `CYW43_COUNTRY()`) |
+| `TIMEZONE` | `UTC0` | 100 bytes | POSIX TZ string, or a timezone name looked up from `zones.csv` on the SD card |
+
+Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. If parsing or validation fails, the file is rejected and defaults are used.
+
+The `TIMEZONE` value is first checked against the `zones.csv` lookup table (format: `Name,"POSIX TZ string"` per line). If a match is found, the resolved POSIX string is used; otherwise the raw value is passed directly to `setenv("TZ", ...)`. This allows either a human-readable timezone name (e.g. `Europe/Budapest`) or a raw POSIX TZ string (e.g. `CET-1CEST,M3.5.0,M10.5.0/3`).

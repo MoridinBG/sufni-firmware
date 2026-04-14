@@ -97,6 +97,25 @@ picotool load build/<preset-name>/sufni-suspension-telemetry.uf2 -f
 
 If the Pico is already in BOOTSEL mode, omit the `-f` flag.
 
+## Configuration
+
+The device reads a `CONFIG` file from the SD card at boot. It is a plain-text `key=value` file (one entry per line). Missing keys use built-in defaults. The file can be edited manually on the SD card or uploaded remotely via the management protocol.
+
+| Key | Default | Description |
+|---|---|---|
+| `WIFI_MODE` | `STA` | `STA` (join existing network) or `AP` (create access point) |
+| `STA_SSID` | `sst` | SSID for station mode (also accepted as `SSID`) |
+| `STA_PSK` | `changemeplease` | Password for station mode (also accepted as `PSK`) |
+| `AP_SSID` | `SufniDAQ` | SSID when in AP mode |
+| `AP_PSK` | `changemeplease` | Password when in AP mode (minimum 8 characters) |
+| `NTP_SERVER` | `pool.ntp.org` | NTP server hostname for time sync |
+| `SST_SERVER` | `sst.sghctoma.com` | Server hostname for SST file upload |
+| `SST_SERVER_PORT` | `557` | Server port for SST file upload |
+| `COUNTRY` | `HU` | 2-letter country code for WiFi regulatory domain |
+| `TIMEZONE` | `UTC0` | POSIX TZ string, or a timezone name resolved via `zones.csv` on the SD card |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for field sizes and validation rules.
+
 ## Test utilities
 
 - `test_utils/inspect_sst_data.py`: Parses an SST file and prints chunk summary (types, counts, record counts, sample rates).

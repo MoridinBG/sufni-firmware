@@ -57,6 +57,10 @@ Configure via cmake presets or `-D` flags. See ARCHITECTURE.md for the full tabl
 - **SST format**: TLV binary, little-endian, packed structs. See ARCHITECTURE.md for the full format reference.
 - **IMU calibration**: Two-phase (stationary + tilted) determines gyro bias, gravity vector, and forward direction. Builds a rotation matrix to map arbitrary sensor mounting to bike frame coordinates (X=forward, Y=left, Z=up). Temperature compensated.
 
+## CONFIG file
+
+The device reads a `CONFIG` file (key=value, one per line) from the SD card at boot. Keys: `WIFI_MODE` (`STA`/`AP`), `STA_SSID`, `STA_PSK`, `AP_SSID`, `AP_PSK`, `NTP_SERVER`, `SST_SERVER`, `SST_SERVER_PORT`, `COUNTRY` (2-letter WiFi regulatory code), `TIMEZONE` (POSIX TZ string or name resolved via `zones.csv`). Legacy aliases `SSID`/`PSK` are accepted for `STA_SSID`/`STA_PSK`. Parsed in `src/util/config.c`. See ARCHITECTURE.md for the full field reference with defaults and validation rules.
+
 ## Code style
 
 - `.clang-format` is present (LLVM base, 4-space indent, 120 col limit)
