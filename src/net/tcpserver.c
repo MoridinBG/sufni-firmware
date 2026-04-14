@@ -3,6 +3,7 @@
 #include "lwip/apps/mdns.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include "pico/unique_id.h"
 #include "wifi.h"
 
 #include <stdio.h>
@@ -46,7 +47,7 @@ static void tcpserver_reset_connection_state(struct tcpserver *server) {
 static bool tcpserver_can_accept_client(const struct tcpserver *server) {
     size_t index;
 
-    if (server->err_disconnect_pending) {
+    if (server->err_disconnect_pending || server->client_connected) {
         return false;
     }
 
@@ -76,12 +77,14 @@ static void tcpserver_complete_error_disconnect(struct tcpserver *server) {
         return;
     }
 
-    server->err_disconnect_pending = false;
+    // Keep err_disconnect_pending true during cleanup so tcp_server_accept
+    // rejects new connections until the protocol disconnect is fully handled.
     if (server->protocol_ops != NULL) {
         server->protocol_ops->on_disconnect(server);
     }
     tcpserver_reset_connection_state(server);
     tcpserver_clear_stale_management_response();
+    server->err_disconnect_pending = false;
 
     if (server->last_error != 0) {
         LOG("TCP", "Client disconnected with error: %d\n", server->last_error);
@@ -93,21 +96,31 @@ static err_t tcpserver_close_client(struct tcpserver *server) {
     err_t err = ERR_OK;
 
     if (server->client_pcb != NULL) {
+        struct tcp_pcb *pcb = server->client_pcb;
+
         if (server->protocol_ops != NULL) {
             server->protocol_ops->on_disconnect(server);
         }
 
-        tcp_arg(server->client_pcb, NULL);
-        tcp_poll(server->client_pcb, NULL, 0);
-        tcp_sent(server->client_pcb, NULL);
-        tcp_recv(server->client_pcb, NULL);
-        tcp_err(server->client_pcb, NULL);
-        err = tcp_close(server->client_pcb);
-        if (err != ERR_OK) {
-            tcp_abort(server->client_pcb);
-            err = ERR_ABRT;
+        // All lwIP PCB operations must be inside the lock — the CYW43 background
+        // interrupt can otherwise process packets mid-close and corrupt the pool.
+        // Re-check the pointer: tcp_server_err may have freed the PCB during
+        // on_disconnect (e.g. live abort spin-wait).
+        cyw43_arch_lwip_begin();
+        if (server->client_pcb == pcb) {
+            tcp_arg(pcb, NULL);
+            tcp_poll(pcb, NULL, 0);
+            tcp_sent(pcb, NULL);
+            tcp_recv(pcb, NULL);
+            tcp_err(pcb, NULL);
+            err = tcp_close(pcb);
+            if (err != ERR_OK) {
+                tcp_abort(pcb);
+                err = ERR_ABRT;
+            }
+            server->client_pcb = NULL;
         }
-        server->client_pcb = NULL;
+        cyw43_arch_lwip_end();
     }
 
     // Clear the flag in case tcp_server_err raced with this close path.
@@ -248,6 +261,19 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err)
         return ERR_ABRT;
     }
 
+    // Safety net: detach and abort any orphaned PCB left by a previous accept
+    // that raced with a disconnect (shouldn't happen with the client_connected
+    // guard above, but prevents a leaked PCB from corrupting state via callbacks).
+    if (server->client_pcb != NULL) {
+        tcp_arg(server->client_pcb, NULL);
+        tcp_poll(server->client_pcb, NULL, 0);
+        tcp_sent(server->client_pcb, NULL);
+        tcp_recv(server->client_pcb, NULL);
+        tcp_err(server->client_pcb, NULL);
+        tcp_abort(server->client_pcb);
+        server->client_pcb = NULL;
+    }
+
     LOG("TCP", "Client connected\n");
     tcpserver_reset_connection_state(server);
     server->client_pcb = client_pcb;
@@ -262,27 +288,33 @@ static err_t tcp_server_accept(void *arg, struct tcp_pcb *client_pcb, err_t err)
 }
 
 static bool tcp_server_open(struct tcpserver *server) {
-    struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
+    struct tcp_pcb *pcb;
     err_t err;
 
+    cyw43_arch_lwip_begin();
+    pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
     if (pcb == NULL) {
+        cyw43_arch_lwip_end();
         return false;
     }
 
     err = tcp_bind(pcb, NULL, TCP_PORT);
     if (err != ERR_OK) {
         tcp_close(pcb);
+        cyw43_arch_lwip_end();
         return false;
     }
 
     server->server_pcb = tcp_listen_with_backlog(pcb, 1);
     if (server->server_pcb == NULL) {
         tcp_close(pcb);
+        cyw43_arch_lwip_end();
         return false;
     }
 
     tcp_arg(server->server_pcb, server);
     tcp_accept(server->server_pcb, tcp_server_accept);
+    cyw43_arch_lwip_end();
     return true;
 }
 
@@ -293,6 +325,7 @@ static void tcpserver_teardown(struct tcpserver *server) {
         tcpserver_close_client(server);
     }
 
+    cyw43_arch_lwip_begin();
     if (server->server_pcb != NULL) {
         tcp_arg(server->server_pcb, NULL);
         tcp_close(server->server_pcb);
@@ -307,6 +340,7 @@ static void tcpserver_teardown(struct tcpserver *server) {
         mdns_resp_remove_netif(server->netif);
         server->mdns_netif_added = false;
     }
+    cyw43_arch_lwip_end();
 }
 
 bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *options) {
