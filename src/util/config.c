@@ -15,8 +15,6 @@ struct config config = {
     .ap_ssid = "SufniDAQ",
     .ap_psk = "changemeplease",
     .ntp_server = "pool.ntp.org",
-    .sst_server = "sst.sghctoma.com",
-    .sst_server_port = 557,
     .country = CYW43_COUNTRY_HUNGARY,
     .timezone = "UTC0",
 };
@@ -37,8 +35,6 @@ static void reset_config_defaults(struct config *cfg) {
         .ap_ssid = "SufniDAQ",
         .ap_psk = "changemeplease",
         .ntp_server = "pool.ntp.org",
-        .sst_server = "sst.sghctoma.com",
-        .sst_server_port = 557,
         .country = CYW43_COUNTRY_HUNGARY,
         .timezone = "UTC0",
     };
@@ -84,16 +80,6 @@ static bool parse_country_value(struct config *cfg, const char *value) {
         return false;
     }
     cfg->country = CYW43_COUNTRY(value[0], value[1], 0);
-    return true;
-}
-
-static bool parse_port_value(struct config *cfg, const char *value) {
-    char *end = NULL;
-    unsigned long port = strtoul(value, &end, 10);
-    if (end == value || *end != 0 || port > UINT16_MAX) {
-        return false;
-    }
-    cfg->sst_server_port = (uint16_t)port;
     return true;
 }
 
@@ -146,10 +132,6 @@ bool config_load_file(const char *path, struct config *out) {
             copy_config_string(parsed.ap_psk, sizeof(parsed.ap_psk), value);
         } else if (strcmp(key, "NTP_SERVER") == 0) {
             copy_config_string(parsed.ntp_server, sizeof(parsed.ntp_server), value);
-        } else if (strcmp(key, "SST_SERVER") == 0) {
-            copy_config_string(parsed.sst_server, sizeof(parsed.sst_server), value);
-        } else if (strcmp(key, "SST_SERVER_PORT") == 0) {
-            parse_ok = parse_port_value(&parsed, value) && parse_ok;
         } else if (strcmp(key, "COUNTRY") == 0) {
             parse_ok = parse_country_value(&parsed, value) && parse_ok;
         } else if (strcmp(key, "TIMEZONE") == 0) {

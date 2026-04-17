@@ -33,6 +33,7 @@ enum management_frame_type {
     MGMT_FRAME_PUT_FILE_COMMIT = 6,
     MGMT_FRAME_SET_TIME_REQ = 7,
     MGMT_FRAME_PING = 8,
+    MGMT_FRAME_MARK_SST_UPLOADED_REQ = 9,
 
     MGMT_FRAME_LIST_DIR_ENTRY = 16,
     MGMT_FRAME_LIST_DIR_DONE = 17,
@@ -77,6 +78,7 @@ enum management_session_state {
     MGMT_SESSION_TRASH_FILE = 5,
     MGMT_SESSION_WAIT_CORE_RESPONSE = 6,
     MGMT_SESSION_SEND_ACTION_RESULT = 7,
+    MGMT_SESSION_MARK_SST_UPLOADED = 8,
 };
 
 struct management_frame_header {
@@ -102,6 +104,10 @@ struct management_get_file_req {
 } __attribute__((packed));
 
 struct management_trash_file_req {
+    int32_t record_id;
+} __attribute__((packed));
+
+struct management_mark_sst_uploaded_req {
     int32_t record_id;
 } __attribute__((packed));
 
@@ -186,6 +192,7 @@ struct management_session {
     uint8_t pending_chunk_data[MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE];
 
     int32_t pending_trash_record_id;
+    int32_t pending_mark_uploaded_record_id;
     struct management_set_time_req pending_time;
 };
 

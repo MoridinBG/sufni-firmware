@@ -552,6 +552,32 @@ static void management_service_trash_file(struct tcpserver *server) {
     management_begin_action_result(session, session->active_request_id, MGMT_RESULT_OK);
 }
 
+static void management_service_mark_sst_uploaded(struct tcpserver *server) {
+    struct management_session *session = &server->management;
+    char old_path[16];
+    char new_path[24];
+
+    if (!management_make_record_name(session->pending_mark_uploaded_record_id, session->file_name)) {
+        management_begin_action_result(session, session->active_request_id, MGMT_RESULT_INVALID_REQUEST);
+        return;
+    }
+
+    snprintf(old_path, sizeof(old_path), "%s", session->file_name);
+    snprintf(new_path, sizeof(new_path), "uploaded/%s", session->file_name);
+
+    if (f_stat(old_path, NULL) != FR_OK) {
+        management_begin_action_result(session, session->active_request_id, MGMT_RESULT_NOT_FOUND);
+        return;
+    }
+
+    if (ff_rename(old_path, new_path, 1) != 0) {
+        management_begin_action_result(session, session->active_request_id, MGMT_RESULT_IO_ERROR);
+        return;
+    }
+
+    management_begin_action_result(session, session->active_request_id, MGMT_RESULT_OK);
+}
+
 // Two-phase handshake with Core 0 via management_shared:
 // Phase 1: wait for shared state to reach IDLE, then publish request.
 // Phase 2: wait for Core 0 to set RESPONSE_READY, then harvest result.
@@ -777,6 +803,27 @@ bool management_protocol_process_rx(struct tcpserver *server) {
                 tcpserver_consume_rx(server, (uint16_t)frame_bytes);
                 return true;
             }
+            case MGMT_FRAME_MARK_SST_UPLOADED_REQ: {
+                struct management_mark_sst_uploaded_req req;
+
+                if (header.payload_length != sizeof(req)) {
+                    management_protocol_violation(server, header.request_id, MGMT_RESULT_INVALID_REQUEST);
+                    return false;
+                }
+
+                if (session->upload_open) {
+                    management_begin_action_result(session, header.request_id, MGMT_RESULT_BUSY);
+                    tcpserver_consume_rx(server, (uint16_t)frame_bytes);
+                    return true;
+                }
+
+                memcpy(&req, payload, sizeof(req));
+                session->active_request_id = header.request_id;
+                session->pending_mark_uploaded_record_id = req.record_id;
+                session->state = MGMT_SESSION_MARK_SST_UPLOADED;
+                tcpserver_consume_rx(server, (uint16_t)frame_bytes);
+                return true;
+            }
             case MGMT_FRAME_PUT_FILE_BEGIN: {
                 struct management_put_file_begin_req req;
 
@@ -885,6 +932,9 @@ void management_protocol_service(struct tcpserver *server) {
             break;
         case MGMT_SESSION_TRASH_FILE:
             management_service_trash_file(server);
+            break;
+        case MGMT_SESSION_MARK_SST_UPLOADED:
+            management_service_mark_sst_uploaded(server);
             break;
         case MGMT_SESSION_WAIT_CORE_RESPONSE:
             management_service_wait_core_response(server);

@@ -35,7 +35,6 @@
 #include "core1_worker.h"
 #include "data_acquisition.h"
 #include "data_storage.h"
-#include "data_sync.h"
 #include "display.h"
 #include "fw_init.h"
 #include "fw_state.h"
@@ -280,7 +279,6 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
     struct tcpserver_options tcp_options = {
         .allow_live_preview = allow_live_preview,
         .enable_mdns = true,
-        .mark_downloaded_on_success = true,
     };
     enum core1_dispatch_event event_id;
     int32_t event_data = 0;
@@ -357,15 +355,7 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
 
 static void on_serve_tcp() { run_tcp_session(SERVE_TCP, "SERVER ON", true); }
 
-static void on_sync_data() {
-    if (config.wifi_mode == WIFI_MODE_AP) {
-        run_tcp_session(SYNC_DATA, "READY DL", false);
-        return;
-    }
-
-    sync_recorded_data(&disp);
-    state = IDLE;
-}
+static void on_sync_data() { run_tcp_session(SYNC_DATA, "READY DL", false); }
 
 static void (*state_handlers[STATES_COUNT])() = {
     on_idle,      /* IDLE */
@@ -432,9 +422,7 @@ static void on_right_press(void *user_data) {
             tcp_session_stop_requested = true;
             break;
         case SYNC_DATA:
-            if (config.wifi_mode == WIFI_MODE_AP) {
-                tcp_session_stop_requested = true;
-            }
+            tcp_session_stop_requested = true;
             break;
         default:
             break;

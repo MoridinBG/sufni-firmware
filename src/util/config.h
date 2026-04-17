@@ -16,9 +16,7 @@ struct config {
     char ap_ssid[33];
     char ap_psk[64];
     char ntp_server[264];
-    char sst_server[264];
     char timezone[100];
-    uint16_t sst_server_port;
     uint32_t country;
 };
 

@@ -30,7 +30,6 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 | `core1_worker.c` / `core1_worker.h`             | Core 1 dispatcher, backend mode selection, stop requests, and status tracking                                               |
 | `data_acquisition.c` / `data_acquisition.h`     | Core 0 recording timers, acquisition buffers, GPS wait/record callbacks, marker flushing, and storage-session FIFO commands |
 | `data_storage.c` / `data_storage.h`             | Core 1 storage session backend (`storage_session_run`), SST file creation, chunk serialization, and file close              |
-| `data_sync.c` / `data_sync.h`                   | WiFi upload workflow for recorded SST files via TCP client                                                                  |
 | `live_stream_shared.c` / `live_stream_shared.h` | Shared live session state, slot pools, queue counters, and control state used by both cores                                 |
 | `live_core0_session.c` / `live_core0_session.h` | Core 0 live-preview session start or stop, negotiated timers, GPS live routing, slot filling, and drop accounting           |
 | `management_shared.c` / `management_shared.h`   | Cross-core management request/response state for config apply and time set                                                  |
@@ -42,9 +41,8 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 | `tcpserver.c` / `tcpserver.h`                   | Core 1-owned TCP server: connection lifecycle, protocol detection, dispatch to protocol handlers                            |
 | `live_protocol.h`                               | Versioned wire format for live preview: frame header, session metadata, batch payloads, stats                               |
 | `live_core1_protocol.c` / `live_core1_protocol.h` | Core 1 live protocol handler: request processing, frame emission, slot draining, teardown, and session stats              |
-| `management_protocol.c` / `management_protocol.h` | Core 1 management protocol handler: file listing, download, trash, config upload, time update                             |
-| `tcpclient.c` / `tcpclient.h`                   | TCP client for pushing SST files to a remote server in `SYNC_DATA`                                                          |
-| `wifi.c` / `wifi.h`                             | WiFi lifecycle: STA or AP mode start from config, stop, mode query                                                          |
+| `management_protocol.c` / `management_protocol.h` | Core 1 management protocol handler: file listing, download, trash, mark-uploaded, config upload, time update             |
+| `wifi.c` / `wifi.h`                             | WiFi lifecycle: STA or AP mode start from config, stop                                                                      |
 
 Other modules:
 
@@ -59,7 +57,7 @@ Other modules:
 
 ## State machine
 
-The main loop in `src/fw/main.c` dispatches to a handler function indexed by the current state. Startup work is delegated to `fw_init.c`, acquisition to `data_acquisition.c`, sync to `data_sync.c`, and some state rendering to `state_views.c`.
+The main loop in `src/fw/main.c` dispatches to a handler function indexed by the current state. Startup work is delegated to `fw_init.c`, acquisition to `data_acquisition.c`, and some state rendering to `state_views.c`.
 
 | State       | Trigger                        | Description                                                                                                                                                 |
 | ----------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -70,16 +68,16 @@ The main loop in `src/fw/main.c` dispatches to a handler function indexed by the
 | `GPS_WAIT`  | GPS available during REC_START | Waits for reliable GPS fix (10 consecutive good fixes with 3D fix, >=6 sats, EPE<=6m). User can skip (left press) or confirm when ready.                    |
 | `RECORD`    | After REC_START/GPS_WAIT       | Active data acquisition. Repeating timer callbacks sample sensors into buffers while the main loop idles in the `RECORD` slot.                              |
 | `REC_STOP`  | Left press in RECORD           | Stops timers, flushes remaining data, closes file.                                                                                                          |
-| `SYNC_DATA` | Left long-press in IDLE        | Connects WiFi, pushes all SST files to configured server via TCP client, moves to `uploaded/`.                                                              |
+| `SYNC_DATA` | Left long-press in IDLE        | Starts WiFi and runs the TCP server with live preview disabled. Clients pull recordings via the management protocol and then explicitly move verified downloads to `uploaded/` via a follow-up management action. |
 | `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves either the management protocol or live preview. |
 | `MSC`       | USB cable detected at boot     | USB Mass Storage mode. SD card exposed directly to host. Mutually exclusive with normal operation.                                                          |
 
 Button mapping:
 
 - **Left press**: Start/stop recording, confirm GPS, skip GPS wait
-- **Left long-press**: Sync data to server
-- **Right press**: Sleep (from IDLE), set marker (during recording), request TCP backend stop from `SERVE_TCP`
-- **Right long-press**: Start TCP server
+- **Left long-press**: Start the download server (`SYNC_DATA`)
+- **Right press**: Sleep (from IDLE), set marker (during recording), request TCP backend stop from `SERVE_TCP` and `SYNC_DATA`
+- **Right long-press**: Start the live preview server (`SERVE_TCP`)
 
 ## Core 1 dispatcher
 
@@ -328,13 +326,9 @@ Uses the CYW43 WiFi chip on Pico W / Pico 2 W. Supports both STA (station) and A
 
 On WiFi connect, syncs time from a configurable NTP server via SNTP. Updates both the Pico's always-on timer and the external DS3231 RTC. Timezone handling uses POSIX TZ strings loaded from a `zones.csv` file on the SD card.
 
-### TCP client (data sync)
-
-`send_file()` in `src/net/tcpclient.c` connects to a configured server (`sst_server:sst_server_port`), pushes each SST file with a header containing board ID + file size + filename, and moves successfully sent files to `uploaded/`.
-
 ### TCP server (remote access and live preview)
 
-The TCP server listens on port 1557 with mDNS service `_gosst._tcp`. The mDNS TXT record includes `bid=<hex>` with the board's unique ID (`pico_unique_board_id_t`), allowing clients to distinguish multiple boards on the same network. Core 1 owns the server loop while Core 0 remains in the `SERVE_TCP` state handler.
+The TCP server listens on port 1557 with mDNS service `_gosst._tcp` in both AP and STA WiFi modes — WiFi mode is a link-layer choice only. The mDNS TXT record includes `bid=<hex>` with the board's unique ID (`pico_unique_board_id_t`), allowing clients to distinguish multiple boards on the same network. Core 1 owns the server loop while Core 0 remains in the `SYNC_DATA` or `SERVE_TCP` state handler. Both states run the same server; they differ only in whether the live-preview protocol is accepted (disabled in `SYNC_DATA`, enabled in `SERVE_TCP`).
 
 The server uses a pluggable protocol handler architecture. On each new connection, the first bytes are matched against registered protocol detectors. Two protocols are supported:
 
@@ -369,6 +363,7 @@ Request frame types:
 | `PUT_FILE_COMMIT`  | 6  | (none)                                         | Finalize upload, validate and apply                 |
 | `SET_TIME_REQ`    | 7  | `{uint32_t utc_seconds, uint32_t micros}`      | Set device time                                     |
 | `PING`            | 8  | (none)                                         | Keepalive                                           |
+| `MARK_SST_UPLOADED_REQ` | 9 | `{int32_t record_id}`                       | Move a root SST to `uploaded/` after client-side validation |
 
 Response frame types:
 
@@ -407,6 +402,8 @@ Result codes: `OK` (0), `INVALID_REQUEST` (-1), `NOT_FOUND` (-2), `BUSY` (-3), `
 **Config upload flow**: The client sends `PUT_FILE_BEGIN` with `MGMT_FILE_CONFIG` and the file size, then `PUT_FILE_CHUNK` frames with the raw config data, and finally `PUT_FILE_COMMIT`. The server writes chunks to a staging file (`CONFIG.TMP`), then validates the staged config into a snapshot struct. The request is forwarded to Core 0 via `management_shared` with `MGMT_CORE_CMD_APPLY_CONFIG`. Core 0 applies the config and publishes back a result code. The server returns `ACTION_RESULT` with the final status.
 
 **Time update flow**: `SET_TIME_REQ` is forwarded to Core 0 via `management_shared` with `MGMT_CORE_CMD_SET_TIME`. Core 0 updates the system time and the DS3231 RTC.
+
+**Mark-uploaded flow**: `GET_FILE_REQ` is read-only — the server never renames on `FILE_END`. After the client has downloaded and validated a root SST, it issues `MARK_SST_UPLOADED_REQ` with the recording's `record_id`. The server moves `xxxxx.SST` to `uploaded/xxxxx.SST` and replies with `ACTION_RESULT`. Any non-root-SST target is impossible to express (no `file_class` field) or collapses to `NOT_FOUND`. This is the only code path that populates `uploaded/`.
 
 **Cross-core communication**: Management operations that require Core 0 action (config apply, time set) use `management_shared.h`. Core 1 publishes a request (`MGMT_CORE_STATE_REQUEST_READY`), Core 0 processes it and publishes a response (`MGMT_CORE_STATE_RESPONSE_READY`), then Core 1 acknowledges and returns to idle. Memory barriers (`__dmb()`) guard all state transitions.
 
@@ -526,7 +523,7 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 
 ```
 /
-├── CONFIG              Key=value config (wifi_mode, SSID, PSK, NTP_SERVER, SST_SERVER, etc.)
+├── CONFIG              Key=value config (wifi_mode, SSID, PSK, NTP_SERVER, etc.)
 ├── CONFIG.TMP          Staging file during management config upload (temporary)
 ├── CALIBRATION         Binary calibration data (travel + IMU)
 ├── BOARDID             Board unique ID string
@@ -535,7 +532,7 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 ├── 00001.SST           Recording files (5-digit zero-padded, .SST extension)
 ├── 00002.SST
 ├── ...
-├── uploaded/           Successfully synced files moved here
+├── uploaded/           Recordings moved here after a client confirms it has validated its downloaded copy (via MARK_SST_UPLOADED_REQ)
 └── trash/              Files trashed via management protocol moved here
 ```
 
@@ -551,8 +548,6 @@ The `CONFIG` file is a plain-text `key=value` file (one entry per line, `=` deli
 | `AP_SSID` | `SufniDAQ` | 33 bytes | SSID when in AP mode |
 | `AP_PSK` | `changemeplease` | 64 bytes | Password when in AP mode (minimum 8 characters) |
 | `NTP_SERVER` | `pool.ntp.org` | 264 bytes | NTP server hostname for time sync |
-| `SST_SERVER` | `sst.sghctoma.com` | 264 bytes | Server hostname for SST file upload |
-| `SST_SERVER_PORT` | `557` | uint16 | Server port for SST file upload |
 | `COUNTRY` | `HU` | uint32 | 2-letter country code for WiFi regulatory domain (maps to `CYW43_COUNTRY()`) |
 | `TIMEZONE` | `UTC0` | 100 bytes | POSIX TZ string, or a timezone name looked up from `zones.csv` on the SD card |
 

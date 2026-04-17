@@ -32,7 +32,6 @@ struct tcpserver_protocol_ops {
 struct tcpserver_options {
     bool allow_live_preview;
     bool enable_mdns;
-    bool mark_downloaded_on_success;
 };
 
 struct tcpserver {

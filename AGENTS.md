@@ -11,7 +11,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive: state machine, SS
 - `src/fw/fw_state.h` - Shared runtime state and state enum used across firmware modules
 - `src/fw/data_acquisition.c` - Core 0 acquisition timers, sensor buffers, markers, Core 1 writer protocol
 - `src/fw/data_storage.c` - Core 1 SD writer and SST chunk serialization
-- `src/fw/data_sync.c` - WiFi upload/sync workflow for recorded SST files
 - `src/fw/state_views.c` - State-specific display rendering for `IDLE` and `GPS_WAIT`
 - `src/fw/sensor_setup.c` - Compile-time-selected global GPS/IMU sensor instances
 - `src/fw/display.c` / `src/fw/helpers.c` - Shared display setup and runtime helpers
@@ -20,7 +19,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep dive: state machine, SS
 - `src/sensor/` - Sensor drivers: `travel/` (AS5600, linear ADC), `imu/` (MPU6050, LSM6DSO), `gps/` (LC76G)
 - `src/fw/calibration_flow.c` - Interactive calibration sequence (travel + IMU)
 - `src/fw/calibration_storage.c` - Binary calibration file read/write
-- `src/net/` - TCP client (push files to server) and TCP server (serve files via mDNS)
+- `src/net/` - TCP server (serve files and live preview via mDNS; works in both AP and STA WiFi modes)
 - `src/msc/` - USB Mass Storage mode (TinyUSB)
 - `test_utils/` - Python scripts to inspect SST files and extract GPS tracks to GPX
 - `generate_cmake_presets.py` - Interactive cmake preset generator for hardware configs
@@ -59,7 +58,7 @@ Configure via cmake presets or `-D` flags. See ARCHITECTURE.md for the full tabl
 
 ## CONFIG file
 
-The device reads a `CONFIG` file (key=value, one per line) from the SD card at boot. Keys: `WIFI_MODE` (`STA`/`AP`), `STA_SSID`, `STA_PSK`, `AP_SSID`, `AP_PSK`, `NTP_SERVER`, `SST_SERVER`, `SST_SERVER_PORT`, `COUNTRY` (2-letter WiFi regulatory code), `TIMEZONE` (POSIX TZ string or name resolved via `zones.csv`). Legacy aliases `SSID`/`PSK` are accepted for `STA_SSID`/`STA_PSK`. Parsed in `src/util/config.c`. See ARCHITECTURE.md for the full field reference with defaults and validation rules.
+The device reads a `CONFIG` file (key=value, one per line) from the SD card at boot. Keys: `WIFI_MODE` (`STA`/`AP`), `STA_SSID`, `STA_PSK`, `AP_SSID`, `AP_PSK`, `NTP_SERVER`, `COUNTRY` (2-letter WiFi regulatory code), `TIMEZONE` (POSIX TZ string or name resolved via `zones.csv`). Legacy aliases `SSID`/`PSK` are accepted for `STA_SSID`/`STA_PSK`. Parsed in `src/util/config.c`. See ARCHITECTURE.md for the full field reference with defaults and validation rules.
 
 ## Code style
 

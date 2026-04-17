@@ -18,7 +18,6 @@ static struct tcpserver core1_tcp_server;
 static struct tcpserver_options core1_tcp_server_options = {
     .allow_live_preview = true,
     .enable_mdns = true,
-    .mark_downloaded_on_success = true,
 };
 static volatile bool core1_stop_requested = false;
 
@@ -95,7 +94,6 @@ void core1_configure_tcp_server(const struct tcpserver_options *options) {
         core1_tcp_server_options = (struct tcpserver_options){
             .allow_live_preview = true,
             .enable_mdns = true,
-            .mark_downloaded_on_success = true,
         };
         return;
     }

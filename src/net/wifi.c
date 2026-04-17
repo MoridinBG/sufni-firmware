@@ -114,6 +114,4 @@ void wifi_stop(void) {
     active_netif = NULL;
 }
 
-bool wifi_mode_is_ap(void) { return wifi_running && wifi_active_mode == WIFI_MODE_AP; }
-
 struct netif *wifi_active_netif(void) { return active_netif; }

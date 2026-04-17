@@ -109,8 +109,6 @@ The device reads a `CONFIG` file from the SD card at boot. It is a plain-text `k
 | `AP_SSID` | `SufniDAQ` | SSID when in AP mode |
 | `AP_PSK` | `changemeplease` | Password when in AP mode (minimum 8 characters) |
 | `NTP_SERVER` | `pool.ntp.org` | NTP server hostname for time sync |
-| `SST_SERVER` | `sst.sghctoma.com` | Server hostname for SST file upload |
-| `SST_SERVER_PORT` | `557` | Server port for SST file upload |
 | `COUNTRY` | `HU` | 2-letter country code for WiFi regulatory domain |
 | `TIMEZONE` | `UTC0` | POSIX TZ string, or a timezone name resolved via `zones.csv` on the SD card |
 

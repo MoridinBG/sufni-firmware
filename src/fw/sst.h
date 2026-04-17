@@ -1,7 +1,8 @@
 #ifndef _SST_H
 #define _SST_H
 
-#include "../net/tcpclient.h"
+#include <time.h>
+
 #include "../ui/pushbutton.h"
 #include "as5600.h"
 #include "hardware_config.h"

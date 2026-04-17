@@ -37,7 +37,6 @@ add_executable(sufni-suspension-telemetry
     src/fw/core1_worker.c
     src/fw/fw_init.c
     src/fw/data_acquisition.c
-    src/fw/data_sync.c
     src/fw/data_storage.c
     src/fw/display.c
     src/fw/helpers.c
@@ -51,7 +50,6 @@ add_executable(sufni-suspension-telemetry
     src/fw/sst.c
     src/fs/microsd.c
     src/net/dhcpserver.c
-    src/net/tcpclient.c
     src/net/tcpserver.c
     src/net/wifi.c
     src/net/live_core1_protocol.c

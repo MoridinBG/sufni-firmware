@@ -359,7 +359,6 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
                                       : (struct tcpserver_options){
                                             .allow_live_preview = true,
                                             .enable_mdns = true,
-                                            .mark_downloaded_on_success = true,
                                         };
     tcpserver_reset_connection_state(server);
 
