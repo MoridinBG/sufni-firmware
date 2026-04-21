@@ -2,8 +2,8 @@
 
 #include "tcpserver.h"
 
-#include "../fw/management_shared.h"
 #include "../fw/sst.h"
+#include "../ntp/ntp.h"
 #include "../util/log.h"
 
 #include "ff_stdio.h"
@@ -578,56 +578,6 @@ static void management_service_mark_sst_uploaded(struct tcpserver *server) {
     management_begin_action_result(session, session->active_request_id, MGMT_RESULT_OK);
 }
 
-// Two-phase handshake with Core 0 via management_shared:
-// Phase 1: wait for shared state to reach IDLE, then publish request.
-// Phase 2: wait for Core 0 to set RESPONSE_READY, then harvest result.
-// Drains any stale response from a prior disconnected session before publishing.
-static void management_service_wait_core_response(struct tcpserver *server) {
-    struct management_session *session = &server->management;
-
-    if (!session->core_request_published) {
-        enum management_core_state shared_state = management_shared_get_state();
-
-        if (shared_state == MGMT_CORE_STATE_RESPONSE_READY) {
-            management_shared_complete_response();
-            shared_state = MGMT_CORE_STATE_IDLE;
-        }
-        if (shared_state != MGMT_CORE_STATE_IDLE) {
-            return;
-        }
-
-        management_core_shared.request_id = session->response_request_id;
-        management_core_shared.command = session->pending_core_command;
-        switch (session->pending_core_command) {
-            case MGMT_CORE_CMD_APPLY_CONFIG:
-                management_core_shared.request.apply_config.snapshot = session->upload_snapshot;
-                break;
-            case MGMT_CORE_CMD_SET_TIME:
-                management_core_shared.request.set_time.utc_seconds = session->pending_time.utc_seconds;
-                management_core_shared.request.set_time.micros = session->pending_time.micros;
-                break;
-            case MGMT_CORE_CMD_NONE:
-            default:
-                management_begin_action_result(session, session->response_request_id, MGMT_RESULT_INVALID_REQUEST);
-                return;
-        }
-
-        management_shared_publish_request();
-        session->core_request_published = true;
-        return;
-    }
-
-    if (management_shared_get_state() != MGMT_CORE_STATE_RESPONSE_READY) {
-        return;
-    }
-
-    session->action_result_code = management_core_shared.result_code;
-    management_shared_complete_response();
-    session->pending_core_command = MGMT_CORE_CMD_NONE;
-    session->core_request_published = false;
-    session->state = MGMT_SESSION_SEND_ACTION_RESULT;
-}
-
 static void management_service_commit_upload(struct tcpserver *server) {
     struct management_session *session = &server->management;
 
@@ -657,11 +607,9 @@ static void management_service_commit_upload(struct tcpserver *server) {
         return;
     }
 
-    session->response_request_id = session->active_request_id;
-    session->pending_core_command = MGMT_CORE_CMD_APPLY_CONFIG;
-    session->core_request_published = false;
-    session->state = MGMT_SESSION_WAIT_CORE_RESPONSE;
     session->upload_request_id = 0;
+    config_apply_snapshot(&session->upload_snapshot);
+    management_begin_action_result(session, session->active_request_id, MGMT_RESULT_OK);
 }
 
 static void management_service_send_action_result(struct tcpserver *server) {
@@ -683,7 +631,8 @@ void management_protocol_reset_session(struct tcpserver *server) {
 }
 
 static bool management_protocol_can_accept(const struct tcpserver *server) {
-    return management_shared_get_state() != MGMT_CORE_STATE_REQUEST_READY;
+    (void)server;
+    return true;
 }
 
 static void management_protocol_on_accept(struct tcpserver *server) { management_protocol_reset_session(server); }
@@ -886,11 +835,14 @@ bool management_protocol_process_rx(struct tcpserver *server) {
                 if (session->upload_open) {
                     management_begin_action_result(session, header.request_id, MGMT_RESULT_BUSY);
                 } else {
-                    memcpy(&session->pending_time, payload, sizeof(session->pending_time));
-                    session->response_request_id = header.request_id;
-                    session->pending_core_command = MGMT_CORE_CMD_SET_TIME;
-                    session->core_request_published = false;
-                    session->state = MGMT_SESSION_WAIT_CORE_RESPONSE;
+                    struct management_set_time_req req;
+                    int32_t result_code;
+
+                    memcpy(&req, payload, sizeof(req));
+                    result_code = set_system_time_utc((time_t)req.utc_seconds, req.micros)
+                                      ? MGMT_RESULT_OK
+                                      : MGMT_RESULT_INTERNAL_ERROR;
+                    management_begin_action_result(session, header.request_id, result_code);
                 }
 
                 tcpserver_consume_rx(server, (uint16_t)frame_bytes);
@@ -935,9 +887,6 @@ void management_protocol_service(struct tcpserver *server) {
             break;
         case MGMT_SESSION_MARK_SST_UPLOADED:
             management_service_mark_sst_uploaded(server);
-            break;
-        case MGMT_SESSION_WAIT_CORE_RESPONSE:
-            management_service_wait_core_response(server);
             break;
         case MGMT_SESSION_SEND_ACTION_RESULT:
             management_service_send_action_result(server);

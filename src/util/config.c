@@ -167,8 +167,6 @@ void config_apply_snapshot(const struct config *snapshot) {
     }
 
     config = *snapshot;
-    setenv("TZ", config.timezone, 1);
-    tzset();
 }
 
 bool load_config() {

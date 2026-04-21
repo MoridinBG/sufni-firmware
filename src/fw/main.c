@@ -40,7 +40,6 @@
 #include "fw_state.h"
 #include "helpers.h"
 #include "live_core0_session.h"
-#include "management_shared.h"
 #include "sensor_setup.h"
 #include "sst.h"
 #include "state_views.h"
@@ -246,35 +245,6 @@ static void on_disabled_gps() { tight_loop_contents(); }
 // RECORD work runs from acquisition timers after recording_start, so the main loop only idles here.
 static void on_rec() { tight_loop_contents(); }
 
-static void service_management_core_requests(void) {
-    int32_t result_code = MGMT_RESULT_INVALID_REQUEST;
-
-    if (management_shared_get_state() != MGMT_CORE_STATE_REQUEST_READY) {
-        return;
-    }
-
-    switch (management_core_shared.command) {
-        case MGMT_CORE_CMD_APPLY_CONFIG: {
-            struct config snapshot = management_core_shared.request.apply_config.snapshot;
-            config_apply_snapshot(&snapshot);
-            result_code = MGMT_RESULT_OK;
-            break;
-        }
-        case MGMT_CORE_CMD_SET_TIME:
-            result_code = set_system_time_utc((time_t)management_core_shared.request.set_time.utc_seconds,
-                                              management_core_shared.request.set_time.micros)
-                              ? MGMT_RESULT_OK
-                              : MGMT_RESULT_INTERNAL_ERROR;
-            break;
-        case MGMT_CORE_CMD_NONE:
-        default:
-            result_code = MGMT_RESULT_INVALID_REQUEST;
-            break;
-    }
-
-    management_shared_publish_response(result_code);
-}
-
 static void run_tcp_session(enum state session_state, const char *ready_message, bool allow_live_preview) {
     struct tcpserver_options tcp_options = {
         .allow_live_preview = allow_live_preview,
@@ -284,7 +254,6 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
     int32_t event_data = 0;
 
     tcp_session_stop_requested = false;
-    management_shared_reset();
     display_message(&disp, "CONNECT");
     if (!wifi_start_from_config(true)) {
         display_message(&disp, "CONN ERR");
@@ -322,8 +291,6 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
 
     display_message(&disp, ready_message);
     while (state == session_state) {
-        service_management_core_requests();
-
         if (allow_live_preview) {
             live_stream_core0_service();
         }

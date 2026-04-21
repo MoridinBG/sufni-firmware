@@ -6,7 +6,6 @@
 
 #include "ff.h"
 
-#include "../fw/management_shared.h"
 #include "../util/config.h"
 
 #define MANAGEMENT_PROTOCOL_MAGIC   0x544D474Du
@@ -76,9 +75,8 @@ enum management_session_state {
     MGMT_SESSION_BEGIN_UPLOAD = 3,
     MGMT_SESSION_COMMIT_UPLOAD = 4,
     MGMT_SESSION_TRASH_FILE = 5,
-    MGMT_SESSION_WAIT_CORE_RESPONSE = 6,
-    MGMT_SESSION_SEND_ACTION_RESULT = 7,
-    MGMT_SESSION_MARK_SST_UPLOADED = 8,
+    MGMT_SESSION_SEND_ACTION_RESULT = 6,
+    MGMT_SESSION_MARK_SST_UPLOADED = 7,
 };
 
 struct management_frame_header {
@@ -158,8 +156,6 @@ struct management_session {
     uint32_t active_request_id;
     uint32_t response_request_id;
     int32_t action_result_code;
-    enum management_core_command pending_core_command;
-    bool core_request_published;
 
     uint16_t list_dir_id;
     uint32_t list_entry_count;
@@ -193,7 +189,6 @@ struct management_session {
 
     int32_t pending_trash_record_id;
     int32_t pending_mark_uploaded_record_id;
-    struct management_set_time_req pending_time;
 };
 
 void management_protocol_reset_session(struct tcpserver *server);

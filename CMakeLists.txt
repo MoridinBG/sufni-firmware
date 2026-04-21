@@ -40,7 +40,6 @@ add_executable(sufni-suspension-telemetry
     src/fw/data_storage.c
     src/fw/display.c
     src/fw/helpers.c
-    src/fw/management_shared.c
     src/fw/live_stream_shared.c
     src/fw/live_core0_session.c
     src/fw/live_watchdog_diag.c

@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../fw/management_shared.h"
 #include "../util/log.h"
 
 #define TCP_PORT    1557
@@ -65,12 +64,6 @@ static bool tcpserver_can_accept_client(const struct tcpserver *server) {
     return true;
 }
 
-static void tcpserver_clear_stale_management_response(void) {
-    if (management_shared_get_state() == MGMT_CORE_STATE_RESPONSE_READY) {
-        management_shared_complete_response();
-    }
-}
-
 // Finish a disconnect that tcp_server_err could only flag (ISR context).
 static void tcpserver_complete_error_disconnect(struct tcpserver *server) {
     if (!server->err_disconnect_pending || server->client_pcb != NULL) {
@@ -83,7 +76,6 @@ static void tcpserver_complete_error_disconnect(struct tcpserver *server) {
         server->protocol_ops->on_disconnect(server);
     }
     tcpserver_reset_connection_state(server);
-    tcpserver_clear_stale_management_response();
     server->err_disconnect_pending = false;
 
     if (server->last_error != 0) {
@@ -126,7 +118,6 @@ static err_t tcpserver_close_client(struct tcpserver *server) {
     // Clear the flag in case tcp_server_err raced with this close path.
     server->err_disconnect_pending = false;
     tcpserver_reset_connection_state(server);
-    tcpserver_clear_stale_management_response();
     return err;
 }
 
@@ -409,10 +400,6 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
         }
 
         tcpserver_complete_error_disconnect(server);
-
-        if (!server->client_connected) {
-            tcpserver_clear_stale_management_response();
-        }
 
         if (server->client_connected) {
             if (server->close_client_requested || !tcpserver_process_client(server)) {

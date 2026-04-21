@@ -6,12 +6,29 @@
 #include <string.h>
 
 #include "../rtc/ds3231.h"
-#include "../util/config.h"
 
 extern struct ds3231 rtc;
 
 static volatile uint64_t start_time_us = 0;
 static volatile bool ntp_done = false;
+
+static int64_t days_from_civil(int year, unsigned month, unsigned day) {
+    year -= month <= 2u;
+    int era = (year >= 0 ? year : year - 399) / 400;
+    unsigned year_of_era = (unsigned)(year - era * 400);
+    unsigned day_of_year = (153u * (month + (month > 2u ? (unsigned)-3 : 9u)) + 2u) / 5u + day - 1u;
+    unsigned day_of_era = year_of_era * 365u + year_of_era / 4u - year_of_era / 100u + day_of_year;
+    return (int64_t)era * 146097 + (int64_t)day_of_era - 719468;
+}
+
+static time_t utc_epoch_from_tm(const struct tm *tm_utc) {
+    int year = tm_utc->tm_year + 1900;
+    unsigned month = (unsigned)tm_utc->tm_mon + 1u;
+    unsigned day = (unsigned)tm_utc->tm_mday;
+    int64_t days = days_from_civil(year, month, day);
+    int64_t seconds = (((days * 24) + tm_utc->tm_hour) * 60 + tm_utc->tm_min) * 60 + tm_utc->tm_sec;
+    return (time_t)seconds;
+}
 
 time_t rtc_timestamp() {
 #if PICO_RP2040
@@ -21,18 +38,7 @@ time_t rtc_timestamp() {
         return 0;
     }
 
-    // We want to store UTC values in record files, and we don't have timegm,
-    // so we set UTC0 as timezone string here ...
-    setenv("TZ", "UTC0", 1);
-    tzset();
-
-    time_t t = mktime(&tm_now);
-
-    // ... and we restore the original one after we got the timestamp.
-    setenv("TZ", config.timezone, 1);
-    tzset();
-
-    return t;
+    return utc_epoch_from_tm(&tm_now);
 #else
     // RP2350: use linear time methods (native to Powman Timer), no timezone conversion
     struct timespec ts;
