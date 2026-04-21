@@ -5,7 +5,9 @@
 
 #include "lwip/netif.h"
 
-bool wifi_start_from_config(bool do_ntp);
+struct config;
+
+bool wifi_start_with_config(const struct config *cfg, bool do_ntp);
 void wifi_stop(void);
 struct netif *wifi_active_netif(void);
 

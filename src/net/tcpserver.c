@@ -391,11 +391,11 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
     return true;
 }
 
-bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
+bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_requested, void *stop_context) {
     LOG("TCP", "Server started, waiting for requests\n");
 
     while (!server->finish_requested) {
-        if (stop_requested != NULL && *stop_requested) {
+        if (stop_requested != NULL && stop_requested(stop_context)) {
             tcpserver_finish(server);
         }
 

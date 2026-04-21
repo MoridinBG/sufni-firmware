@@ -147,8 +147,8 @@ static void init_runtime(ssd1306_t *disp) {
     }
     LOG("INIT", "Config loaded\n");
 
-    setup_ntp(config.ntp_server);
     cyw43_arch_init_with_country(config.country);
+    setup_ntp(config.ntp_server);
     setenv("TZ", config.timezone, 1);
     tzset();
     LOG("INIT", "WiFi initialized, country=%d, timezone=%s\n", config.country, config.timezone);

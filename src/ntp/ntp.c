@@ -1,6 +1,7 @@
 #include "ntp.h"
 #include "lwip/apps/sntp.h"
 #include "pico/aon_timer.h"
+#include "pico/cyw43_arch.h"
 #include "pico/platform.h"
 #include "pico/time.h"
 #include <string.h>
@@ -49,19 +50,27 @@ time_t rtc_timestamp() {
 
 bool sync_rtc_to_ntp() {
     ntp_done = false;
+
+    cyw43_arch_lwip_begin();
     sntp_init();
+    cyw43_arch_lwip_end();
 
     absolute_time_t timeout_time = make_timeout_time_ms(NTP_TIMEOUT_TIME);
     while (!ntp_done && absolute_time_diff_us(get_absolute_time(), timeout_time) > 0) { tight_loop_contents(); }
 
+    cyw43_arch_lwip_begin();
     sntp_stop();
+    cyw43_arch_lwip_end();
 
     return ntp_done;
 }
 
 void setup_ntp(const char *server) {
+    cyw43_arch_lwip_begin();
     sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_setservername(0, server);
+    cyw43_arch_lwip_end();
+
     if (aon_timer_is_running()) {
         start_time_us = rtc_timestamp() * 1000000;
     } else {

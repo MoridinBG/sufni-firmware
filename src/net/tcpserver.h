@@ -56,6 +56,8 @@ struct tcpserver {
     struct management_session management;
 };
 
+typedef bool (*tcpserver_stop_requested_fn)(void *context);
+
 static inline void tcpserver_consume_rx(struct tcpserver *server, uint16_t bytes_to_consume) {
     if (bytes_to_consume >= server->rx_len) {
         server->rx_len = 0;
@@ -67,7 +69,7 @@ static inline void tcpserver_consume_rx(struct tcpserver *server, uint16_t bytes
 }
 
 bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *options);
-bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested);
+bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_requested, void *stop_context);
 void tcpserver_finish(struct tcpserver *server);
 
 #endif /* _TCPSERVER_H */

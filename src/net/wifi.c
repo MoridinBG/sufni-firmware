@@ -19,13 +19,13 @@ static struct netif *wifi_netif_for_mode(enum wifi_mode mode) {
     return &cyw43_state.netif[mode == WIFI_MODE_AP ? CYW43_ITF_AP : CYW43_ITF_STA];
 }
 
-static bool wifi_start_sta(bool do_ntp) {
+static bool wifi_start_sta(const struct config *cfg, bool do_ntp) {
     LOG("WiFi", "Enabling STA mode\n");
     cyw43_arch_enable_sta_mode();
 
-    LOG("WiFi", "Connecting to SSID: %s\n", config.sta_ssid);
+    LOG("WiFi", "Connecting to SSID: %s\n", cfg->sta_ssid);
     bool connected =
-        cyw43_arch_wifi_connect_timeout_ms(config.sta_ssid, config.sta_psk, CYW43_AUTH_WPA2_AES_PSK, 20000) == 0;
+        cyw43_arch_wifi_connect_timeout_ms(cfg->sta_ssid, cfg->sta_psk, CYW43_AUTH_WPA2_AES_PSK, 20000) == 0;
     if (!connected) {
         LOG("WiFi", "STA connection failed\n");
         cyw43_arch_disable_sta_mode();
@@ -39,6 +39,7 @@ static bool wifi_start_sta(bool do_ntp) {
 
     LOG("WiFi", "STA connected successfully\n");
     if (do_ntp) {
+        setup_ntp(cfg->ntp_server);
         LOG("WiFi", "Syncing RTC to NTP\n");
         sync_rtc_to_ntp();
     }
@@ -46,9 +47,9 @@ static bool wifi_start_sta(bool do_ntp) {
     return true;
 }
 
-static bool wifi_start_ap(void) {
-    LOG("WiFi", "Enabling AP mode, SSID: %s\n", config.ap_ssid);
-    cyw43_arch_enable_ap_mode(config.ap_ssid, config.ap_psk, CYW43_AUTH_WPA2_AES_PSK);
+static bool wifi_start_ap(const struct config *cfg) {
+    LOG("WiFi", "Enabling AP mode, SSID: %s\n", cfg->ap_ssid);
+    cyw43_arch_enable_ap_mode(cfg->ap_ssid, cfg->ap_psk, CYW43_AUTH_WPA2_AES_PSK);
 
     struct netif *ap_netif = wifi_netif_for_mode(WIFI_MODE_AP);
 
@@ -76,7 +77,11 @@ static bool wifi_start_ap(void) {
     return true;
 }
 
-bool wifi_start_from_config(bool do_ntp) {
+bool wifi_start_with_config(const struct config *cfg, bool do_ntp) {
+    if (cfg == NULL) {
+        return false;
+    }
+
     if (wifi_running) {
         wifi_stop();
     }
@@ -84,10 +89,10 @@ bool wifi_start_from_config(bool do_ntp) {
     active_netif = NULL;
     wifi_running = false;
 
-    if (config.wifi_mode == WIFI_MODE_AP) {
-        return wifi_start_ap();
+    if (cfg->wifi_mode == WIFI_MODE_AP) {
+        return wifi_start_ap(cfg);
     }
-    return wifi_start_sta(do_ntp);
+    return wifi_start_sta(cfg, do_ntp);
 }
 
 void wifi_stop(void) {
