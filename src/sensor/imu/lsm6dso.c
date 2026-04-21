@@ -1,4 +1,5 @@
 #include "lsm6dso.h"
+#include "../../util/i2c_safe.h"
 #include "../../util/log.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
@@ -7,6 +8,7 @@
 #include "pico/error.h"
 #include "pico/time.h"
 #include <stdio.h>
+#include <string.h>
 
 #define WHO_AM_I   0x0F
 #define CTRL1_XL   0x10
@@ -19,6 +21,24 @@
 #define WRITE_MASK 0x7F
 #define READ_MASK  0x80
 
+#define SENSOR_I2C_BAUDRATE      1000000u
+#define I2C_RECOVERY_PULSE_COUNT 9u
+#define I2C_RECOVERY_DELAY_US    5u
+#define LSM6DSO_I2C_TIMEOUT_US   2000u
+
+static bool lsm6dso_recover_bus(struct imu_sensor *imu) {
+    return i2c_recover_bus(imu->comm.i2c.instance, imu->comm.i2c.sda_gpio, imu->comm.i2c.scl_gpio, SENSOR_I2C_BAUDRATE,
+                           I2C_RECOVERY_PULSE_COUNT, I2C_RECOVERY_DELAY_US);
+}
+
+static void lsm6dso_maybe_recover_timeout(struct imu_sensor *imu, int rc) {
+    if (rc != PICO_ERROR_TIMEOUT) {
+        return;
+    }
+
+    lsm6dso_recover_bus(imu);
+}
+
 static void write_register(struct imu_sensor *imu, uint8_t reg, uint8_t data) {
     if (imu->protocol == IMU_PROTOCOL_SPI) {
         uint8_t buf[2];
@@ -29,7 +49,11 @@ static void write_register(struct imu_sensor *imu, uint8_t reg, uint8_t data) {
         gpio_put(imu->comm.spi.cs_gpio, 1);
     } else {
         uint8_t buf[2] = {reg, data};
-        i2c_write_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 2, false);
+        int rc = i2c_write_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 2, false,
+                                              LSM6DSO_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            lsm6dso_maybe_recover_timeout(imu, rc);
+        }
     }
 }
 
@@ -42,13 +66,24 @@ static uint8_t read_register(struct imu_sensor *imu, uint8_t reg) {
         spi_read_blocking(imu->comm.spi.instance, 0, buf, 1);
         gpio_put(imu->comm.spi.cs_gpio, 1);
     } else {
-        i2c_write_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true);
-        i2c_read_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 1, false);
+        int rc = i2c_write_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true,
+                                              LSM6DSO_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            lsm6dso_maybe_recover_timeout(imu, rc);
+            return 0;
+        }
+
+        rc = i2c_read_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 1, false,
+                                         LSM6DSO_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            lsm6dso_maybe_recover_timeout(imu, rc);
+            return 0;
+        }
     }
     return buf[0];
 }
 
-static void read_registers(struct imu_sensor *imu, uint8_t reg, uint8_t *buf, size_t len) {
+static bool read_registers(struct imu_sensor *imu, uint8_t reg, uint8_t *buf, size_t len) {
     if (imu->protocol == IMU_PROTOCOL_SPI) {
         uint8_t reg_addr = reg | READ_MASK;
         gpio_put(imu->comm.spi.cs_gpio, 0);
@@ -56,9 +91,22 @@ static void read_registers(struct imu_sensor *imu, uint8_t reg, uint8_t *buf, si
         spi_read_blocking(imu->comm.spi.instance, 0, buf, len);
         gpio_put(imu->comm.spi.cs_gpio, 1);
     } else {
-        i2c_write_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true);
-        i2c_read_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, buf, len, false);
+        int rc = i2c_write_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true,
+                                              LSM6DSO_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            lsm6dso_maybe_recover_timeout(imu, rc);
+            return false;
+        }
+
+        rc = i2c_read_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, buf, len, false,
+                                         LSM6DSO_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            lsm6dso_maybe_recover_timeout(imu, rc);
+            return false;
+        }
     }
+
+    return true;
 }
 
 void lsm6dso_init(struct imu_sensor *imu) {
@@ -73,7 +121,7 @@ void lsm6dso_init(struct imu_sensor *imu) {
         gpio_set_dir(imu->comm.spi.cs_gpio, GPIO_OUT);
         gpio_put(imu->comm.spi.cs_gpio, 1);
     } else {
-        i2c_init(imu->comm.i2c.instance, 1000000);
+        i2c_init(imu->comm.i2c.instance, SENSOR_I2C_BAUDRATE);
         gpio_set_function(imu->comm.i2c.sda_gpio, GPIO_FUNC_I2C);
         gpio_set_function(imu->comm.i2c.scl_gpio, GPIO_FUNC_I2C);
         gpio_pull_up(imu->comm.i2c.sda_gpio);
@@ -119,8 +167,11 @@ bool lsm6dso_check_availability(struct imu_sensor *imu) {
 }
 
 void lsm6dso_read_raw(struct imu_sensor *imu, int16_t raw[6]) {
-    uint8_t buffer[12];
-    read_registers(imu, OUTX_L_G, buffer, 12);
+    uint8_t buffer[12] = {0};
+    if (!read_registers(imu, OUTX_L_G, buffer, 12)) {
+        memset(raw, 0, sizeof(int16_t) * 6);
+        return;
+    }
 
     raw[3] = (int16_t)(buffer[1] << 8 | buffer[0]);   // gx
     raw[4] = (int16_t)(buffer[3] << 8 | buffer[2]);   // gy
@@ -131,8 +182,10 @@ void lsm6dso_read_raw(struct imu_sensor *imu, int16_t raw[6]) {
 }
 
 int16_t lsm6dso_read_temperature(struct imu_sensor *imu) {
-    uint8_t buffer[2];
-    read_registers(imu, OUT_TEMP_L, buffer, 2); // Reads both OUT_TEMP_L & OUT_TEMP_H
+    uint8_t buffer[2] = {0};
+    if (!read_registers(imu, OUT_TEMP_L, buffer, 2)) {
+        return 0;
+    }
     return (int16_t)(buffer[1] << 8 | buffer[0]);
 }
 

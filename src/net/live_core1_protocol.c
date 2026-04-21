@@ -4,15 +4,20 @@
 #include "tcpserver.h"
 
 #include "../fw/live_stream_shared.h"
+#include "../fw/live_watchdog_diag.h"
 #include "../fw/sensor_setup.h"
 #include "../util/log.h"
 
 #include "lwip/tcp.h"
+#include "pico/async_context.h"
+#include "pico/async_context_threadsafe_background.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 #include "pico/unique_id.h"
 
 #include <string.h>
+
+#define LIVE_LWIP_LOCK_WAIT_US 2000u
 
 #define LIVE_TX_FRAME_BUFFER_SIZE                                                                                      \
     (sizeof(struct live_frame_header) + sizeof(struct live_batch_payload) +                                            \
@@ -30,6 +35,36 @@ static bool live_protocol_needs_service(const struct tcpserver *server);
 static void live_protocol_wait_for_quiescent_control(struct tcpserver *server);
 static void live_protocol_abort(struct tcpserver *server);
 
+static bool live_try_enter_lwip(async_context_t **context_out) {
+    async_context_t *context = cyw43_arch_async_context();
+
+    if (context == NULL) {
+        return false;
+    }
+
+#if PICO_CYW43_ARCH_THREADSAFE_BACKGROUND
+    {
+        async_context_threadsafe_background_t *threadsafe = (async_context_threadsafe_background_t *)context;
+        absolute_time_t deadline = make_timeout_time_us(LIVE_LWIP_LOCK_WAIT_US);
+
+        do {
+            if (recursive_mutex_try_enter(&threadsafe->lock_mutex, NULL)) {
+                *context_out = context;
+                return true;
+            }
+            live_watchdog_diag_mark_core1(0u);
+            tight_loop_contents();
+        } while (!time_reached(deadline));
+
+        return false;
+    }
+#else
+    cyw43_arch_lwip_begin();
+    *context_out = context;
+    return true;
+#endif
+}
+
 const struct tcpserver_protocol_ops live_core1_protocol_ops = {
     .can_accept = live_protocol_can_accept,
     .on_accept = live_protocol_on_accept,
@@ -41,22 +76,29 @@ const struct tcpserver_protocol_ops live_core1_protocol_ops = {
 };
 
 static void live_reset_session(struct tcpserver *server) {
+    uint64_t now_us = time_us_64();
+
     server->live = (struct live_protocol_session){
         .tx_sequence = 1,
-        .last_stats_us = time_us_64(),
+        .last_stats_us = now_us,
     };
 }
 
 static bool live_write_frame_bytes(struct tcpserver *server, const void *frame_bytes, uint32_t total_bytes) {
+    async_context_t *lwip_context = NULL;
     err_t err;
+    uint32_t sndbuf;
 
     if (server->client_pcb == NULL) {
         return false;
     }
 
-    cyw43_arch_lwip_begin();
-    if (tcp_sndbuf(server->client_pcb) < total_bytes) {
-        cyw43_arch_lwip_end();
+    if (!live_try_enter_lwip(&lwip_context)) {
+        return false;
+    }
+    sndbuf = tcp_sndbuf(server->client_pcb);
+    if (sndbuf < total_bytes) {
+        async_context_release_lock(lwip_context);
         return false;
     }
 
@@ -64,9 +106,13 @@ static bool live_write_frame_bytes(struct tcpserver *server, const void *frame_b
     if (err == ERR_OK) {
         tcp_output(server->client_pcb);
     }
-    cyw43_arch_lwip_end();
+    async_context_release_lock(lwip_context);
 
-    return err == ERR_OK;
+    if (err != ERR_OK) {
+        return false;
+    }
+
+    return true;
 }
 
 static bool live_send_frame(struct tcpserver *server, uint16_t frame_type, const void *payload, uint32_t payload_length,
@@ -88,7 +134,11 @@ static bool live_send_frame(struct tcpserver *server, uint16_t frame_type, const
         memcpy(live_tx_frame_buffer + sizeof(header), payload, payload_length);
     }
 
-    return live_write_frame_bytes(server, live_tx_frame_buffer, total_bytes);
+    if (!live_write_frame_bytes(server, live_tx_frame_buffer, total_bytes)) {
+        return false;
+    }
+
+    return true;
 }
 
 static bool live_send_error(struct tcpserver *server, int32_t error_code) {
@@ -523,6 +573,8 @@ static void live_service_active(struct tcpserver *server) {
 }
 
 static void live_protocol_service(struct tcpserver *server) {
+    live_watchdog_diag_mark_core1(0u);
+
     switch (server->live.phase) {
         case LIVE_PHASE_STARTING:
             live_service_starting(server);
@@ -551,9 +603,13 @@ static bool live_protocol_needs_service(const struct tcpserver *server) {
 static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
     enum live_control_state cs;
 
+    (void)server;
+
     // Disconnect cleanup must not return until the shared live control state is quiescent.
     // tcpserver_reset_connection_state() wipes the local session flags immediately after.
     for (;;) {
+        live_watchdog_diag_mark_core1(0u);
+
         cs = live_stream_get_control_state();
 
         if (cs == LIVE_CONTROL_STOP_RESPONSE_READY) {

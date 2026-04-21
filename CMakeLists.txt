@@ -43,6 +43,7 @@ add_executable(sufni-suspension-telemetry
     src/fw/management_shared.c
     src/fw/live_stream_shared.c
     src/fw/live_core0_session.c
+    src/fw/live_watchdog_diag.c
     src/fw/sensor_setup.c
     src/fw/state_views.c
     src/fw/calibration_storage.c
@@ -59,6 +60,7 @@ add_executable(sufni-suspension-telemetry
     src/rtc/ds3231.c
     src/ui/pushbutton.c
     src/util/config.c
+    src/util/i2c_safe.c
     src/util/log.c
     src/util/list.c
     src/sensor/travel/rotational.c

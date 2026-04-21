@@ -10,6 +10,7 @@
 #include "display.h"
 #include "helpers.h"
 #include "live_core0_session.h"
+#include "live_watchdog_diag.h"
 #include "sensor_setup.h"
 
 #include "../ntp/ntp.h"
@@ -186,6 +187,7 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
     init_rtc_and_aon_timer(disp, rtc);
     init_storage(disp);
     log_init();
+    live_watchdog_diag_init();
 
     init_travel_sensors();
 #if HAS_GPS

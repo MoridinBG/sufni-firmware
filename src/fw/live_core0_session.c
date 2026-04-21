@@ -1,5 +1,7 @@
 #include "live_core0_session.h"
 
+#include "live_watchdog_diag.h"
+
 #include "calibration_flow.h"
 #include "data_acquisition.h"
 #include "sensor_setup.h"
@@ -150,6 +152,8 @@ static bool live_travel_cb(repeating_timer_t *timer) {
         return false;
     }
 
+    live_watchdog_diag_mark_core0(0u);
+
     if (live_runtime.current_travel_slot < 0) {
         live_runtime.current_travel_slot = live_begin_travel_slot(now_us);
         if (live_runtime.current_travel_slot < 0) {
@@ -188,6 +192,8 @@ static bool live_imu_cb(repeating_timer_t *timer) {
     if (!live_runtime.active || !live_runtime.imu_enabled) {
         return false;
     }
+
+    live_watchdog_diag_mark_core0(0u);
 
     if (live_runtime.current_imu_slot < 0) {
         live_runtime.current_imu_slot = live_begin_imu_slot(now_us);
@@ -236,6 +242,8 @@ static bool live_gps_timer_cb(repeating_timer_t *timer) {
     if (!live_runtime.active || !live_runtime.gps_enabled) {
         return false;
     }
+
+    live_watchdog_diag_mark_core0(0u);
 
     if (gps.available) {
         gps.process(&gps);
@@ -419,6 +427,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
     live_stream_shared.start_response = *resp;
     resp->result = LIVE_START_RESULT_OK;
     live_stream_shared.start_response.result = LIVE_START_RESULT_OK;
+    live_watchdog_diag_session_start(resp->session_id);
 
     return true;
 }
@@ -463,6 +472,8 @@ void live_stream_core0_stop(void) {
     }
 #endif
 
+    live_watchdog_diag_session_stop();
+
     memset(&live_runtime, 0, sizeof(live_runtime));
     live_runtime.current_travel_slot = -1;
     live_runtime.current_imu_slot = -1;
@@ -473,9 +484,13 @@ void live_stream_core0_stop(void) {
 bool live_stream_core0_active(void) { return live_runtime.active; }
 
 void live_stream_core0_service(void) {
+    enum live_control_state control_state = live_stream_get_control_state();
+
+    live_watchdog_diag_mark_core0(0u);
+
     // Core 0 only advances requests to *_RESPONSE_READY
     // Core 1 or disconnect abort owns returning the shared control state to IDLE.
-    switch (live_stream_get_control_state()) {
+    switch (control_state) {
         case LIVE_CONTROL_START_REQUESTED:
             live_stream_core0_start(&live_stream_shared.start_request, &live_stream_shared.start_response);
             live_stream_set_control_state(LIVE_CONTROL_START_RESPONSE_READY);

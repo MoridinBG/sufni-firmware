@@ -417,6 +417,7 @@ bool tcpserver_run(struct tcpserver *server, volatile bool *stop_requested) {
         if (server->client_connected) {
             if (server->close_client_requested || !tcpserver_process_client(server)) {
                 int error_code = server->last_error;
+
                 tcpserver_close_client(server);
                 if (error_code != 0) {
                     LOG("TCP", "Client/session closed with error: %d\n", error_code);
