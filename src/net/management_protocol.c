@@ -839,9 +839,8 @@ bool management_protocol_process_rx(struct tcpserver *server) {
                     int32_t result_code;
 
                     memcpy(&req, payload, sizeof(req));
-                    result_code = set_system_time_utc((time_t)req.utc_seconds, req.micros)
-                                      ? MGMT_RESULT_OK
-                                      : MGMT_RESULT_INTERNAL_ERROR;
+                    result_code = set_system_time_utc((time_t)req.utc_seconds, req.micros) ? MGMT_RESULT_OK
+                                                                                           : MGMT_RESULT_INTERNAL_ERROR;
                     management_begin_action_result(session, header.request_id, result_code);
                 }
 

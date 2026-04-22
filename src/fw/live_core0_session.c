@@ -24,6 +24,8 @@
 static const int64_t LIVE_GPS_RX_DRAIN_INTERVAL_US = -(int64_t)GPS_RX_BUFFER_SIZE * 1000000 / (GPS_BAUD_RATE / 10) / 2;
 #endif
 
+#define LIVE_IMU_TARGET_FRAME_BYTES 300u
+
 struct live_runtime_state {
     bool active;
     bool travel_enabled;
@@ -32,6 +34,7 @@ struct live_runtime_state {
     uint32_t publish_cadence_us;
     uint32_t travel_period_us;
     uint32_t imu_period_us;
+    uint32_t imu_max_ticks_per_slot;
     uint32_t gps_fix_interval_ms;
     uint32_t active_imu_count;
     uint32_t active_imu_mask;
@@ -131,6 +134,29 @@ static int live_begin_imu_slot(uint64_t now_us) {
     }
     return slot_index;
 }
+
+static uint32_t live_imu_max_ticks_per_slot(uint32_t active_imu_count) {
+    uint32_t max_payload_bytes;
+    uint32_t ticks_per_slot;
+    uint32_t slot_tick_limit;
+
+    if (active_imu_count == 0u) {
+        return 1u;
+    }
+
+    max_payload_bytes = LIVE_IMU_TARGET_FRAME_BYTES - sizeof(struct live_frame_header) - sizeof(struct live_batch_payload);
+    ticks_per_slot = max_payload_bytes / (active_imu_count * sizeof(struct imu_record));
+    slot_tick_limit = LIVE_IMU_RECORDS_PER_SLOT / active_imu_count;
+
+    if (ticks_per_slot == 0u) {
+        ticks_per_slot = 1u;
+    }
+    if (ticks_per_slot > slot_tick_limit) {
+        ticks_per_slot = slot_tick_limit;
+    }
+
+    return ticks_per_slot;
+}
 #endif
 
 #if HAS_GPS
@@ -205,6 +231,7 @@ static bool live_imu_cb(repeating_timer_t *timer) {
     slot = &live_stream_shared.imu_slots[live_runtime.current_imu_slot];
     if ((slot->header.sample_count > 0 &&
          (now_us - slot->header.first_monotonic_us) >= live_runtime.publish_cadence_us) ||
+        slot->header.sample_count >= live_runtime.imu_max_ticks_per_slot ||
         (slot->header.payload_bytes + (live_runtime.active_imu_count * sizeof(struct imu_record)) >
          LIVE_IMU_RECORDS_PER_SLOT * sizeof(struct imu_record))) {
         live_publish_slot(&slot->header, LIVE_STREAM_TYPE_IMU, &live_stream_shared.imu_stats);
@@ -345,6 +372,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         live_runtime.imu_period_us = resp->imu_period_us;
         live_runtime.active_imu_count = resp->active_imu_count;
         live_runtime.active_imu_mask = resp->active_imu_mask;
+        live_runtime.imu_max_ticks_per_slot = live_imu_max_ticks_per_slot(resp->active_imu_count);
     }
 #endif
 

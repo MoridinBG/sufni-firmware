@@ -45,7 +45,7 @@
         "SHOCK_LINEAR": "OFF",
         "CMAKE_BUILD_TYPE": "Debug",
         "USB_UART_DEBUG": "ON",
-        "LOG_TO_FILE": "ON"
+        "LOG_TO_FILE": "OFF"
       }
     }
   ],

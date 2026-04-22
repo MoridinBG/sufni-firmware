@@ -88,6 +88,11 @@ struct core1_network_session_request {
     struct core1_network_session_config config;
 };
 
+struct core1_network_session_stop_request {
+    uint32_t request_generation;
+    uint32_t session_id;
+};
+
 struct core1_network_session_status {
     uint32_t status_generation;
     uint32_t request_generation;
@@ -99,6 +104,11 @@ struct core1_network_session_status {
 struct core1_network_session_request_mailbox {
     volatile uint32_t publish_generation;
     struct core1_network_session_request request;
+};
+
+struct core1_network_session_stop_request_mailbox {
+    volatile uint32_t publish_generation;
+    struct core1_network_session_stop_request request;
 };
 
 struct core1_network_session_status_mailbox {

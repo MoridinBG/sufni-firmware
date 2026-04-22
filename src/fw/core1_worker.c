@@ -17,6 +17,7 @@ volatile struct core1_worker_status core1_worker_status = {
 
 static struct tcpserver core1_tcp_server;
 static volatile struct core1_network_session_request_mailbox core1_network_session_request_mailbox;
+static volatile struct core1_network_session_stop_request_mailbox core1_network_session_stop_request_mailbox;
 static volatile struct core1_network_session_status_mailbox core1_network_session_status_mailbox = {
     .publish_generation = 0,
     .status =
@@ -53,6 +54,14 @@ static void core1_write_network_session_request(const struct core1_network_sessi
     core1_mailbox_end_write(&core1_network_session_request_mailbox.publish_generation, write_generation);
 }
 
+static void core1_write_network_session_stop_request(const struct core1_network_session_stop_request *request) {
+    uint32_t write_generation =
+        core1_mailbox_begin_write(&core1_network_session_stop_request_mailbox.publish_generation);
+
+    core1_network_session_stop_request_mailbox.request = *request;
+    core1_mailbox_end_write(&core1_network_session_stop_request_mailbox.publish_generation, write_generation);
+}
+
 static bool core1_snapshot_network_session_request(struct core1_network_session_request *request) {
     uint32_t before_generation;
     uint32_t after_generation;
@@ -77,6 +86,30 @@ static bool core1_snapshot_network_session_request(struct core1_network_session_
     return true;
 }
 
+static bool core1_snapshot_network_session_stop_request(struct core1_network_session_stop_request *request) {
+    uint32_t before_generation;
+    uint32_t after_generation;
+
+    if (request == NULL) {
+        return false;
+    }
+
+    do {
+        before_generation = core1_network_session_stop_request_mailbox.publish_generation;
+        if (!core1_mailbox_generation_is_stable(before_generation)) {
+            continue;
+        }
+
+        __dmb();
+        *request = core1_network_session_stop_request_mailbox.request;
+        __dmb();
+
+        after_generation = core1_network_session_stop_request_mailbox.publish_generation;
+    } while (before_generation != after_generation || !core1_mailbox_generation_is_stable(after_generation));
+
+    return true;
+}
+
 static void core1_publish_network_session_status(uint32_t request_generation, uint32_t session_id,
                                                  enum network_session_phase phase,
                                                  enum network_session_error error_code) {
@@ -95,7 +128,7 @@ static void core1_publish_network_session_status(uint32_t request_generation, ui
 
 static bool core1_network_session_should_stop(void *context) {
     struct core1_network_session_stop_context *stop_context = context;
-    struct core1_network_session_request request;
+    struct core1_network_session_stop_request request;
 
     if (stop_context == NULL) {
         return false;
@@ -105,8 +138,7 @@ static bool core1_network_session_should_stop(void *context) {
         return true;
     }
 
-    if (!core1_snapshot_network_session_request(&request) ||
-        request.request_type != CORE1_NETWORK_SESSION_REQUEST_STOP || request.session_id != stop_context->session_id ||
+    if (!core1_snapshot_network_session_stop_request(&request) || request.session_id != stop_context->session_id ||
         request.request_generation <= stop_context->last_handled_request_generation) {
         return false;
     }
@@ -318,17 +350,16 @@ bool core1_request_network_session_start(const struct core1_network_session_conf
 }
 
 bool core1_request_network_session_stop(uint32_t session_id, uint32_t *request_generation) {
-    struct core1_network_session_request request = {0};
+    struct core1_network_session_stop_request request = {0};
 
     if (session_id == 0 || core1_get_mode() == CORE1_MODE_IDLE) {
         return false;
     }
 
-    request.request_type = CORE1_NETWORK_SESSION_REQUEST_STOP;
     request.request_generation = core1_next_network_request_generation++;
     request.session_id = session_id;
 
-    core1_write_network_session_request(&request);
+    core1_write_network_session_stop_request(&request);
     if (request_generation != NULL) {
         *request_generation = request.request_generation;
     }

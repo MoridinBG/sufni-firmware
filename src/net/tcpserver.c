@@ -3,6 +3,7 @@
 #include "lwip/apps/mdns.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include "pico/time.h"
 #include "pico/unique_id.h"
 #include "wifi.h"
 
@@ -176,10 +177,27 @@ static bool tcpserver_process_client(struct tcpserver *server) {
     return !server->close_client_requested;
 }
 
+static bool tcpserver_consume_live_ack_wakeup(struct tcpserver *server) {
+    if (server == NULL || !server->client_connected || server->protocol_mode != TCPSERVER_PROTOCOL_LIVE) {
+        return false;
+    }
+
+    return __atomic_exchange_n(&server->live.tx_ack_wakeup_pending, false, __ATOMIC_ACQ_REL);
+}
+
 static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
-    LWIP_UNUSED_ARG(arg);
+    struct tcpserver *server = (struct tcpserver *)arg;
+
     LWIP_UNUSED_ARG(tpcb);
-    LWIP_UNUSED_ARG(len);
+
+    if (server != NULL && server->protocol_mode == TCPSERVER_PROTOCOL_LIVE) {
+        server->live.tx_ack_events++;
+        server->live.tx_acked_bytes += len;
+        server->live.tx_last_ack_len = len;
+        server->live.tx_last_ack_us = time_us_64();
+        __atomic_store_n(&server->live.tx_ack_wakeup_pending, true, __ATOMIC_RELEASE);
+    }
+
     return ERR_OK;
 }
 
@@ -395,6 +413,8 @@ bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_re
     LOG("TCP", "Server started, waiting for requests\n");
 
     while (!server->finish_requested) {
+        bool skip_sleep = false;
+
         if (stop_requested != NULL && stop_requested(stop_context)) {
             tcpserver_finish(server);
         }
@@ -413,7 +433,10 @@ bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_re
             }
         }
 
-        sleep_ms(1);
+        skip_sleep = tcpserver_consume_live_ack_wakeup(server);
+        if (!skip_sleep) {
+            sleep_ms(1);
+        }
     }
 
     LOG("TCP", "Server stopping\n");
