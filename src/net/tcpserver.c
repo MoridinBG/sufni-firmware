@@ -26,10 +26,18 @@ static const struct tcpserver_protocol_registration tcpserver_protocols[] = {
 };
 
 static void mdns_srv_txt(struct mdns_service *service, void *txt_userdata) {
-    err_t res;
-
     LWIP_UNUSED_ARG(txt_userdata);
-    res = mdns_resp_add_service_txtitem(service, NULL, 0);
+
+    pico_unique_board_id_t board_id;
+    pico_get_unique_board_id(&board_id);
+
+    char txt[4 + PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1]; // "bid=" + hex + null
+    memcpy(txt, "bid=", 4);
+    for (int i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; i++) {
+        snprintf(txt + 4 + i * 2, 3, "%02x", board_id.id[i]);
+    }
+
+    err_t res = mdns_resp_add_service_txtitem(service, txt, (uint8_t)strlen(txt));
     LWIP_ERROR("mdns add service txt failed\n", (res == ERR_OK), return);
 }
 
