@@ -117,7 +117,6 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
 
 #if PICO_RP2040
     if (!aon_timer_start_calendar(&tm_now)) {
-        setup_display(disp);
         halt_with_message(disp, "AON ERR");
     }
 #else
@@ -126,7 +125,6 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
     time_t epoch = mktime(&tm_now);
     struct timespec ts = {.tv_sec = epoch, .tv_nsec = 0};
     if (!aon_timer_start(&ts)) {
-        setup_display(disp);
         halt_with_message(disp, "AON ERR");
     }
 #endif
@@ -135,7 +133,6 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
 static void init_storage(ssd1306_t *disp) {
     int err = setup_storage();
     if (err < 0) {
-        setup_display(disp);
         halt_with_message(disp, "CARD ERR");
     }
     LOG("INIT", "Storage initialized\n");
@@ -184,6 +181,8 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
                    struct fw_power_state *power_state, const struct fw_button_handlers *button_handlers) {
     init_board_io();
     init_pio_i2c_bus();
+    setup_display(disp);
+    display_message(disp, "INIT");
     init_rtc_and_aon_timer(disp, rtc);
     init_storage(disp);
     log_init();
@@ -196,7 +195,6 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
 #if HAS_IMU
     init_imu_sensors();
 #endif
-    setup_display(disp);
 
 #ifndef USB_UART_DEBUG
     if (msc_present()) {
