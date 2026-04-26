@@ -204,14 +204,14 @@ static void management_diag_log_file_summary(struct management_session *session,
     elapsed_us = time_us_64() - session->diag_file_start_us;
     min_sndbuf = session->diag_file_min_sndbuf == UINT32_MAX ? 0u : session->diag_file_min_sndbuf;
     LOG("MGMT",
-        "GET_FILE %s req=%u class=%u rec=%ld size=%llu off=%llu elapsed_us=%llu tx_bytes=%llu rd_bytes=%llu chunks=%u reads=%u max_read_us=%llu min_sndbuf=%u sndblk=%u wrerr=%u max_tx_gap_us=%llu\n",
-        reason != NULL ? reason : "summary", (unsigned)session->diag_file_request_id,
-        (unsigned)session->file_class, (long)session->file_record_id, (unsigned long long)session->file_size,
-        (unsigned long long)session->file_offset, (unsigned long long)elapsed_us,
-        (unsigned long long)session->diag_file_tx_bytes, (unsigned long long)session->diag_file_bytes_read,
-        (unsigned)session->diag_file_chunks_sent, (unsigned)session->diag_file_read_calls,
-        (unsigned long long)session->diag_file_max_read_us, (unsigned)min_sndbuf,
-        (unsigned)session->diag_file_sndbuf_blocked, (unsigned)session->diag_file_write_errors,
+        "GET_FILE %s req=%u class=%u rec=%ld size=%llu off=%llu elapsed_us=%llu tx_bytes=%llu rd_bytes=%llu chunks=%u "
+        "reads=%u max_read_us=%llu min_sndbuf=%u sndblk=%u wrerr=%u max_tx_gap_us=%llu\n",
+        reason != NULL ? reason : "summary", (unsigned)session->diag_file_request_id, (unsigned)session->file_class,
+        (long)session->file_record_id, (unsigned long long)session->file_size, (unsigned long long)session->file_offset,
+        (unsigned long long)elapsed_us, (unsigned long long)session->diag_file_tx_bytes,
+        (unsigned long long)session->diag_file_bytes_read, (unsigned)session->diag_file_chunks_sent,
+        (unsigned)session->diag_file_read_calls, (unsigned long long)session->diag_file_max_read_us,
+        (unsigned)min_sndbuf, (unsigned)session->diag_file_sndbuf_blocked, (unsigned)session->diag_file_write_errors,
         (unsigned long long)session->diag_file_max_tx_gap_us);
     session->diag_file_active = false;
 }
@@ -224,13 +224,11 @@ static void management_diag_log_list_summary(struct management_session *session,
     }
 
     elapsed_us = time_us_64() - session->diag_list_start_us;
-    LOG("MGMT",
-        "LIST_DIR %s req=%u dir=%u entries=%u visited=%u config=%u scans=%u scan_us=%llu elapsed_us=%llu\n",
-        reason != NULL ? reason : "summary", (unsigned)session->diag_list_request_id,
-        (unsigned)session->list_dir_id, (unsigned)session->list_entry_count,
-        (unsigned)session->diag_list_files_visited, (unsigned)session->diag_list_config_entries,
-        (unsigned)session->diag_list_sst_scans, (unsigned long long)session->diag_list_scan_us,
-        (unsigned long long)elapsed_us);
+    LOG("MGMT", "LIST_DIR %s req=%u dir=%u entries=%u visited=%u config=%u scans=%u scan_us=%llu elapsed_us=%llu\n",
+        reason != NULL ? reason : "summary", (unsigned)session->diag_list_request_id, (unsigned)session->list_dir_id,
+        (unsigned)session->list_entry_count, (unsigned)session->diag_list_files_visited,
+        (unsigned)session->diag_list_config_entries, (unsigned)session->diag_list_sst_scans,
+        (unsigned long long)session->diag_list_scan_us, (unsigned long long)elapsed_us);
     session->diag_list_active = false;
 }
 
@@ -647,9 +645,8 @@ static bool management_service_send_file(struct tcpserver *server) {
         remaining_bytes = session->file_size - session->file_offset;
         if (!session->pending_chunk_ready && remaining_bytes > 0u) {
             UINT bytes_read = 0;
-            uint32_t to_read =
-                remaining_bytes > MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE ? MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE
-                                                                     : (uint32_t)remaining_bytes;
+            uint32_t to_read = remaining_bytes > MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE ? MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE
+                                                                                    : (uint32_t)remaining_bytes;
             uint64_t read_start_us = time_us_64();
             FRESULT read_result;
             uint64_t read_elapsed_us;
