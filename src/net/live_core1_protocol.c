@@ -18,9 +18,10 @@
 
 #include <string.h>
 
-#define LIVE_LWIP_LOCK_WAIT_US   2000u
-#define LIVE_TX_ABORT_TIMEOUT_US 1000000u
-#define LIVE_TX_MAX_BURST_FRAMES 4u
+#define LIVE_LWIP_LOCK_WAIT_US         2000u
+#define LIVE_SESSION_STATS_INTERVAL_US 500000u
+#define LIVE_TX_ABORT_TIMEOUT_US       1000000u
+#define LIVE_TX_MAX_BURST_FRAMES       4u
 
 #define LIVE_TX_FRAME_BUFFER_SIZE                                                                                      \
     (sizeof(struct live_frame_header) + sizeof(struct live_batch_payload) +                                            \
@@ -33,10 +34,11 @@ static void live_protocol_on_accept(struct tcpserver *server);
 static void live_protocol_on_disconnect(struct tcpserver *server);
 static bool live_protocol_detect(const struct tcpserver *server);
 static bool live_protocol_process_rx(struct tcpserver *server);
-static void live_protocol_service(struct tcpserver *server);
+static bool live_protocol_service(struct tcpserver *server);
 static bool live_protocol_needs_service(const struct tcpserver *server);
 static void live_protocol_wait_for_quiescent_control(struct tcpserver *server);
 static void live_protocol_abort(struct tcpserver *server);
+static bool live_send_session_stats(struct tcpserver *server);
 
 enum live_tx_diag_failure_reason {
     LIVE_TX_DIAG_FAIL_LWIP_LOCK = 0,
@@ -49,6 +51,19 @@ enum live_tx_diag_stream_index {
     LIVE_TX_DIAG_STREAM_IMU,
     LIVE_TX_DIAG_STREAM_GPS,
     LIVE_TX_DIAG_STREAM_COUNT,
+};
+
+enum live_write_result {
+    LIVE_WRITE_RESULT_OK = 0,
+    LIVE_WRITE_RESULT_RETRY,
+    LIVE_WRITE_RESULT_DROP,
+};
+
+enum live_send_slot_result {
+    LIVE_SEND_SLOT_NONE = 0,
+    LIVE_SEND_SLOT_SENT,
+    LIVE_SEND_SLOT_DROPPED,
+    LIVE_SEND_SLOT_BLOCKED,
 };
 
 static uint64_t live_tx_diag_age_us(uint64_t now_us, uint64_t timestamp_us) {
@@ -144,6 +159,53 @@ static void live_tx_diag_note_failure(struct tcpserver *server, enum live_tx_dia
             server->live.tx_fail_write_err++;
             break;
     }
+}
+
+static volatile uint32_t *live_dropped_batches_counter(enum live_tx_diag_frame_kind frame_kind) {
+    switch (frame_kind) {
+        case LIVE_TX_DIAG_FRAME_TRAVEL:
+            return &live_stream_shared.travel_stats.dropped_batches;
+        case LIVE_TX_DIAG_FRAME_IMU:
+            return &live_stream_shared.imu_stats.dropped_batches;
+        case LIVE_TX_DIAG_FRAME_GPS:
+            return &live_stream_shared.gps_stats.dropped_batches;
+        default:
+            return NULL;
+    }
+}
+
+static const char *live_frame_kind_name(enum live_tx_diag_frame_kind frame_kind) {
+    switch (frame_kind) {
+        case LIVE_TX_DIAG_FRAME_TRAVEL:
+            return "travel";
+        case LIVE_TX_DIAG_FRAME_IMU:
+            return "imu";
+        case LIVE_TX_DIAG_FRAME_GPS:
+            return "gps";
+        case LIVE_TX_DIAG_FRAME_SESSION_STATS:
+            return "stats";
+        case LIVE_TX_DIAG_FRAME_CONTROL:
+            return "control";
+        default:
+            return "unknown";
+    }
+}
+
+static void live_log_backpressure_drop(struct tcpserver *server, enum live_tx_diag_frame_kind frame_kind,
+                                       const struct live_slot_header *header) {
+    uint64_t now_us = time_us_64();
+
+    server->live.tx_backpressure_drop_count++;
+    if (server->live.tx_last_drop_log_us != 0u && (now_us - server->live.tx_last_drop_log_us) < 500000u) {
+        return;
+    }
+
+    LOG("LIVE", "Dropping stale %s batch seq=%u samples=%u age_us=%llu sndbuf=%u sndq=%u drops=%u\n",
+        live_frame_kind_name(frame_kind), (unsigned)header->sequence, (unsigned)header->sample_count,
+        (unsigned long long)live_tx_diag_age_us(now_us, header->first_monotonic_us),
+        (unsigned)server->live.tx_last_sndbuf, (unsigned)server->live.tx_last_sndqueuelen,
+        (unsigned)server->live.tx_backpressure_drop_count);
+    server->live.tx_last_drop_log_us = now_us;
 }
 
 static bool live_tx_diag_has_failures(const struct tcpserver *server) {
@@ -331,8 +393,40 @@ static void live_clear_tx_failure(struct tcpserver *server) {
 }
 
 static bool live_tx_stall_timed_out(const struct tcpserver *server) {
-    return server->live.tx_failure_active &&
-           (time_us_64() - server->live.tx_failure_started_us) >= LIVE_TX_ABORT_TIMEOUT_US;
+    uint64_t deadline_start_us;
+
+    if (!server->live.tx_failure_active) {
+        return false;
+    }
+
+    deadline_start_us = server->live.tx_failure_started_us;
+    if (server->live.tx_last_ack_us >= deadline_start_us) {
+        deadline_start_us = server->live.tx_last_ack_us;
+    }
+
+    return (time_us_64() - deadline_start_us) >= LIVE_TX_ABORT_TIMEOUT_US;
+}
+
+static bool live_has_ready_backlog(const struct tcpserver *server) {
+    return server->live.tx_ready_depth_last[LIVE_TX_DIAG_STREAM_TRAVEL] > 1u ||
+           server->live.tx_ready_depth_last[LIVE_TX_DIAG_STREAM_IMU] > 1u ||
+           server->live.tx_ready_depth_last[LIVE_TX_DIAG_STREAM_GPS] > 1u;
+}
+
+static void live_maybe_send_session_stats(struct tcpserver *server, uint64_t now_us) {
+    if ((now_us - server->live.last_stats_us) < LIVE_SESSION_STATS_INTERVAL_US) {
+        return;
+    }
+
+    // Under backpressure, failed stats sends can devolve into a per-tick retry storm that
+    // consumes lwIP lock time and worsens ERR_MEM churn without helping the data path recover.
+    if (server->live.tx_failure_active || live_has_ready_backlog(server)) {
+        server->live.last_stats_us = now_us;
+        return;
+    }
+
+    (void)live_send_session_stats(server);
+    server->live.last_stats_us = now_us;
 }
 
 static bool live_try_enter_lwip(async_context_t **context_out) {
@@ -352,7 +446,7 @@ static bool live_try_enter_lwip(async_context_t **context_out) {
                 *context_out = context;
                 return true;
             }
-            live_watchdog_diag_mark_core1(0u);
+            live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_LWIP_LOCK_WAIT);
             tight_loop_contents();
         } while (!time_reached(deadline));
 
@@ -387,28 +481,30 @@ static void live_reset_session(struct tcpserver *server) {
     live_reset_tx_diag(server);
 }
 
-static bool live_write_frame_bytes(struct tcpserver *server, enum live_tx_diag_frame_kind frame_kind,
-                                   const void *frame_bytes, uint32_t total_bytes) {
+static enum live_write_result live_write_frame_bytes(struct tcpserver *server, enum live_tx_diag_frame_kind frame_kind,
+                                                     const void *frame_bytes, uint32_t total_bytes) {
     async_context_t *lwip_context = NULL;
     err_t err;
     uint32_t sndbuf;
 
     if (server->client_pcb == NULL) {
-        return false;
+        return LIVE_WRITE_RESULT_RETRY;
     }
+
+    live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_WRITE_FRAME);
 
     if (!live_try_enter_lwip(&lwip_context)) {
         live_tx_diag_note_failure(server, frame_kind, LIVE_TX_DIAG_FAIL_LWIP_LOCK);
         live_note_tx_failure(server);
-        return false;
+        return LIVE_WRITE_RESULT_RETRY;
     }
     sndbuf = tcp_sndbuf(server->client_pcb);
     live_tx_diag_note_pcb_state(server, server->client_pcb, sndbuf);
     if (sndbuf < total_bytes) {
         async_context_release_lock(lwip_context);
         live_tx_diag_note_failure(server, frame_kind, LIVE_TX_DIAG_FAIL_SNDBUF);
-        live_note_tx_failure(server);
-        return false;
+        live_clear_tx_failure(server);
+        return LIVE_WRITE_RESULT_DROP;
     }
 
     err = tcp_write(server->client_pcb, frame_bytes, total_bytes, TCP_WRITE_FLAG_COPY);
@@ -421,14 +517,19 @@ static bool live_write_frame_bytes(struct tcpserver *server, enum live_tx_diag_f
     if (err != ERR_OK) {
         live_tx_diag_note_failure(server, frame_kind, LIVE_TX_DIAG_FAIL_WRITE_ERR);
         live_tx_diag_note_write_err_code(server, err);
+        if (err == ERR_MEM) {
+            live_clear_tx_failure(server);
+            return LIVE_WRITE_RESULT_DROP;
+        }
+
         live_note_tx_failure(server);
-        return false;
+        return LIVE_WRITE_RESULT_RETRY;
     }
 
     live_tx_diag_note_success(server, frame_kind, total_bytes);
     live_clear_tx_failure(server);
 
-    return true;
+    return LIVE_WRITE_RESULT_OK;
 }
 
 static bool live_send_frame(struct tcpserver *server, enum live_tx_diag_frame_kind frame_kind, uint16_t frame_type,
@@ -450,7 +551,7 @@ static bool live_send_frame(struct tcpserver *server, enum live_tx_diag_frame_ki
         memcpy(live_tx_frame_buffer + sizeof(header), payload, payload_length);
     }
 
-    if (!live_write_frame_bytes(server, frame_kind, live_tx_frame_buffer, total_bytes)) {
+    if (live_write_frame_bytes(server, frame_kind, live_tx_frame_buffer, total_bytes) != LIVE_WRITE_RESULT_OK) {
         return false;
     }
 
@@ -588,8 +689,9 @@ static int live_claim_oldest_ready_slot(void *base, size_t stride, uint32_t slot
     return -1;
 }
 
-static bool live_send_slot_frame(struct tcpserver *server, enum live_tx_diag_frame_kind frame_kind, uint16_t frame_type,
-                                 struct live_slot_header *header, const void *payload) {
+static enum live_send_slot_result live_send_slot_frame(struct tcpserver *server,
+                                                       enum live_tx_diag_frame_kind frame_kind, uint16_t frame_type,
+                                                       struct live_slot_header *header, const void *payload) {
     struct live_batch_payload batch = {
         .session_id = live_stream_shared.start_response.session_id,
         .stream_sequence = header->sequence,
@@ -605,9 +707,12 @@ static bool live_send_slot_frame(struct tcpserver *server, enum live_tx_diag_fra
         .sequence = server->live.tx_sequence,
     };
     uint32_t total_bytes = sizeof(frame_header) + sizeof(batch) + header->payload_bytes;
+    volatile uint32_t *dropped_batches;
+    enum live_write_result write_result;
+
     if (total_bytes > sizeof(live_tx_frame_buffer)) {
         __atomic_store_n(&header->state, LIVE_SLOT_READY, __ATOMIC_RELEASE);
-        return false;
+        return LIVE_SEND_SLOT_BLOCKED;
     }
 
     memcpy(live_tx_frame_buffer, &frame_header, sizeof(frame_header));
@@ -616,18 +721,28 @@ static bool live_send_slot_frame(struct tcpserver *server, enum live_tx_diag_fra
         memcpy(live_tx_frame_buffer + sizeof(frame_header) + sizeof(batch), payload, header->payload_bytes);
     }
 
-    if (!live_write_frame_bytes(server, frame_kind, live_tx_frame_buffer, total_bytes)) {
-        // Send buffer full — return slot to READY so Core 0 doesn't lose it.
+    write_result = live_write_frame_bytes(server, frame_kind, live_tx_frame_buffer, total_bytes);
+    if (write_result != LIVE_WRITE_RESULT_OK) {
+        if (write_result == LIVE_WRITE_RESULT_DROP) {
+            dropped_batches = live_dropped_batches_counter(frame_kind);
+            if (dropped_batches != NULL) {
+                (*dropped_batches)++;
+            }
+            live_log_backpressure_drop(server, frame_kind, header);
+            live_stream_release_slot(&header->state);
+            return LIVE_SEND_SLOT_DROPPED;
+        }
+
         __atomic_store_n(&header->state, LIVE_SLOT_READY, __ATOMIC_RELEASE);
-        return false;
+        return LIVE_SEND_SLOT_BLOCKED;
     }
 
     server->live.tx_sequence++;
     live_stream_release_slot(&header->state);
-    return true;
+    return LIVE_SEND_SLOT_SENT;
 }
 
-static bool live_send_next_ready_slot(struct tcpserver *server) {
+static enum live_send_slot_result live_send_next_ready_slot(struct tcpserver *server) {
     int slot_index;
 
     slot_index = live_claim_oldest_ready_slot(live_stream_shared.travel_slots, sizeof(struct live_travel_slot),
@@ -652,17 +767,25 @@ static bool live_send_next_ready_slot(struct tcpserver *server) {
         return live_send_slot_frame(server, LIVE_TX_DIAG_FRAME_GPS, LIVE_FRAME_GPS_BATCH, &slot->header, slot->payload);
     }
 
-    return false;
+    return LIVE_SEND_SLOT_NONE;
 }
 
 static uint32_t live_send_ready_burst(struct tcpserver *server) {
     uint32_t sent_count = 0u;
+    enum live_send_slot_result result;
 
     while (sent_count < LIVE_TX_MAX_BURST_FRAMES) {
-        if (!live_send_next_ready_slot(server)) {
-            break;
+        result = live_send_next_ready_slot(server);
+        switch (result) {
+            case LIVE_SEND_SLOT_SENT:
+                sent_count++;
+                break;
+            case LIVE_SEND_SLOT_DROPPED:
+            case LIVE_SEND_SLOT_BLOCKED:
+            case LIVE_SEND_SLOT_NONE:
+            default:
+                return sent_count;
         }
-        sent_count++;
     }
 
     return sent_count;
@@ -894,17 +1017,17 @@ static void live_service_stop_deferred(struct tcpserver *server) {
 }
 
 static void live_service_active(struct tcpserver *server) {
+    uint64_t now_us;
+
     if (server->client_pcb == NULL) {
         return;
     }
 
     live_tx_diag_update_queue_state(server);
     live_send_ready_burst(server);
-    if ((time_us_64() - server->live.last_stats_us) >= 500000u) {
-        if (live_send_session_stats(server)) {
-            server->live.last_stats_us = time_us_64();
-        }
-    }
+    live_tx_diag_update_queue_state(server);
+    now_us = time_us_64();
+    live_maybe_send_session_stats(server, now_us);
 
     if (live_tx_stall_timed_out(server)) {
         server->live.tx_timeout_fired = true;
@@ -914,6 +1037,7 @@ static void live_service_active(struct tcpserver *server) {
             server->live.tx_timeout_requested_stop = true;
         }
 
+        live_watchdog_diag_log_snapshot("tx_timeout");
         live_watchdog_diag_session_stop();
         server->last_error = PICO_ERROR_TIMEOUT;
         server->live.tx_timeout_requested_close = true;
@@ -922,28 +1046,33 @@ static void live_service_active(struct tcpserver *server) {
     }
 }
 
-static void live_protocol_service(struct tcpserver *server) {
-    live_watchdog_diag_mark_core1(0u);
-
+static bool live_protocol_service(struct tcpserver *server) {
     switch (server->live.phase) {
         case LIVE_PHASE_STARTING:
+            live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_SERVICE_STARTING);
             live_service_starting(server);
             break;
         case LIVE_PHASE_START_HANDSHAKE:
+            live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_SERVICE_HANDSHAKE);
             live_service_start_handshake(server);
             break;
         case LIVE_PHASE_ACTIVE:
+            live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_SERVICE_ACTIVE);
             live_service_active(server);
             break;
         case LIVE_PHASE_STOPPING:
+            live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_SERVICE_STOPPING);
             live_service_stopping(server);
             break;
         case LIVE_PHASE_STOP_DEFERRED:
+            live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_SERVICE_STOP_DEFERRED);
             live_service_stop_deferred(server);
             break;
         default:
             break;
     }
+
+    return false;
 }
 
 static bool live_protocol_needs_service(const struct tcpserver *server) {
@@ -958,7 +1087,7 @@ static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
     // Disconnect cleanup must not return until the shared live control state is quiescent.
     // tcpserver_reset_connection_state() wipes the local session flags immediately after.
     for (;;) {
-        live_watchdog_diag_mark_core1(0u);
+        live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_WAIT_QUIESCENT);
 
         cs = live_stream_get_control_state();
 
@@ -996,12 +1125,15 @@ static void live_protocol_wait_for_quiescent_control(struct tcpserver *server) {
 static void live_protocol_abort(struct tcpserver *server) {
     enum live_control_state cs = live_stream_get_control_state();
 
+    live_watchdog_diag_mark_core1(LIVE_WATCHDOG_CORE1_MARKER_ABORT);
+
     if (server->live.phase == LIVE_PHASE_IDLE && !live_stream_shared.active && cs == LIVE_CONTROL_IDLE) {
         return;
     }
 
     server->live.phase = LIVE_PHASE_STOPPING;
     server->live.stop_queued = false;
+    live_watchdog_diag_log_snapshot("abort");
     live_log_tx_diag_summary(server, "abort");
     live_protocol_wait_for_quiescent_control(server);
     live_reset_tx_diag(server);

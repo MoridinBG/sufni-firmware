@@ -168,7 +168,7 @@ static void write_imu_chunk(uint16_t size, struct imu_record *buffer) {
 #endif
 
 int storage_session_run(void) {
-    int index;
+    int index = 0;
     uint32_t command_word;
     uint16_t size;
     struct travel_record *travel_buffer;
@@ -231,7 +231,10 @@ int storage_session_run(void) {
                 f_sync(&recording);
                 break;
             case STORAGE_CMD_FINISH:
-                return f_close(&recording) == FR_OK ? 0 : PICO_ERROR_GENERIC;
+                if (f_close(&recording) != FR_OK) {
+                    return PICO_ERROR_GENERIC;
+                }
+                return 0;
             default:
                 return PICO_ERROR_GENERIC;
         }

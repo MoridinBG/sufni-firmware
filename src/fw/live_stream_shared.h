@@ -8,7 +8,7 @@
 
 #include "sst.h"
 
-#define LIVE_PUBLISH_CADENCE_MS 20u
+#define LIVE_PUBLISH_CADENCE_MS 32u
 
 #define LIVE_MAX_TRAVEL_HZ  1000u
 #define LIVE_MAX_IMU_HZ     1000u

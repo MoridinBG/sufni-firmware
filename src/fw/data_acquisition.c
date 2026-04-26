@@ -24,7 +24,7 @@ const uint16_t IMU_SAMPLE_RATE = 1000;
 #endif
 
 #if HAS_GPS
-const uint16_t GPS_SAMPLE_RATE = 3;
+const uint16_t GPS_SAMPLE_RATE = 10;
 // Drain the UART often enough that the RX buffer stays below full without busy-polling.
 static const int64_t GPS_RX_DRAIN_INTERVAL_US = -(int64_t)GPS_RX_BUFFER_SIZE * 1000000 / (GPS_BAUD_RATE / 10) / 2;
 #endif

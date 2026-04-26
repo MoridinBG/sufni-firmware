@@ -73,6 +73,8 @@ struct live_protocol_session {
     uint32_t tx_ready_depth_max[3];
     uint64_t tx_ready_oldest_age_last_us[3];
     uint64_t tx_ready_oldest_age_max_us[3];
+    uint64_t tx_last_drop_log_us;
+    uint32_t tx_backpressure_drop_count;
 };
 
 extern const struct tcpserver_protocol_ops live_core1_protocol_ops;

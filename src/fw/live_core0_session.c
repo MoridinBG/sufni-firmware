@@ -24,7 +24,7 @@
 static const int64_t LIVE_GPS_RX_DRAIN_INTERVAL_US = -(int64_t)GPS_RX_BUFFER_SIZE * 1000000 / (GPS_BAUD_RATE / 10) / 2;
 #endif
 
-#define LIVE_IMU_TARGET_FRAME_BYTES 300u
+#define LIVE_IMU_TARGET_FRAME_BYTES 1300u
 
 struct live_runtime_state {
     bool active;
@@ -144,7 +144,8 @@ static uint32_t live_imu_max_ticks_per_slot(uint32_t active_imu_count) {
         return 1u;
     }
 
-    max_payload_bytes = LIVE_IMU_TARGET_FRAME_BYTES - sizeof(struct live_frame_header) - sizeof(struct live_batch_payload);
+    max_payload_bytes =
+        LIVE_IMU_TARGET_FRAME_BYTES - sizeof(struct live_frame_header) - sizeof(struct live_batch_payload);
     ticks_per_slot = max_payload_bytes / (active_imu_count * sizeof(struct imu_record));
     slot_tick_limit = LIVE_IMU_RECORDS_PER_SLOT / active_imu_count;
 
@@ -178,7 +179,7 @@ static bool live_travel_cb(repeating_timer_t *timer) {
         return false;
     }
 
-    live_watchdog_diag_mark_core0(0u);
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_TRAVEL_CB);
 
     if (live_runtime.current_travel_slot < 0) {
         live_runtime.current_travel_slot = live_begin_travel_slot(now_us);
@@ -219,7 +220,7 @@ static bool live_imu_cb(repeating_timer_t *timer) {
         return false;
     }
 
-    live_watchdog_diag_mark_core0(0u);
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_IMU_CB);
 
     if (live_runtime.current_imu_slot < 0) {
         live_runtime.current_imu_slot = live_begin_imu_slot(now_us);
@@ -270,7 +271,7 @@ static bool live_gps_timer_cb(repeating_timer_t *timer) {
         return false;
     }
 
-    live_watchdog_diag_mark_core0(0u);
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_GPS_TIMER_CB);
 
     if (gps.available) {
         gps.process(&gps);
@@ -293,6 +294,8 @@ static uint32_t live_requested_rate_or_default(uint32_t requested_rate, uint32_t
 
 bool live_stream_core0_start(const struct live_start_request *req, struct live_start_response *resp) {
     uint32_t requested_mask;
+
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_SESSION_START);
 
     memset(resp, 0, sizeof(*resp));
 
@@ -463,6 +466,8 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
 void live_stream_core0_stop(void) {
     struct live_slot_header *header;
 
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_SESSION_STOP);
+
     if (!live_runtime.active && !live_stream_shared.active && !live_runtime.travel_enabled &&
         !live_runtime.imu_enabled && !live_runtime.gps_enabled) {
         return;
@@ -514,7 +519,7 @@ bool live_stream_core0_active(void) { return live_runtime.active; }
 void live_stream_core0_service(void) {
     enum live_control_state control_state = live_stream_get_control_state();
 
-    live_watchdog_diag_mark_core0(0u);
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_SERVICE);
 
     // Core 0 only advances requests to *_RESPONSE_READY
     // Core 1 or disconnect abort owns returning the shared control state to IDLE.
@@ -540,6 +545,8 @@ void live_stream_core0_on_gps_fix(const struct gps_telemetry *telemetry) {
     if (!live_runtime.active || !live_runtime.gps_enabled) {
         return;
     }
+
+    live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_GPS_FIX);
 
     now_us = time_us_64();
     if (live_runtime.current_gps_slot < 0) {
