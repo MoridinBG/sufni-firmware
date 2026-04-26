@@ -165,7 +165,7 @@ static bool tcpserver_select_protocol(struct tcpserver *server) {
     return true;
 }
 
-static bool tcpserver_process_client(struct tcpserver *server) {
+static bool tcpserver_process_client(struct tcpserver *server, bool *made_progress) {
     if (!tcpserver_select_protocol(server)) {
         return false;
     }
@@ -174,23 +174,38 @@ static bool tcpserver_process_client(struct tcpserver *server) {
         return true;
     }
 
-    if (server->rx_len > 0u && !server->protocol_ops->process_rx(server)) {
-        return false;
+    if (server->rx_len > 0u) {
+        if (made_progress != NULL) {
+            *made_progress = true;
+        }
+        if (!server->protocol_ops->process_rx(server)) {
+            return false;
+        }
     }
 
     if (server->protocol_ops->needs_service(server)) {
-        server->protocol_ops->service(server);
+        bool service_progress = server->protocol_ops->service(server);
+        if (made_progress != NULL && service_progress) {
+            *made_progress = true;
+        }
     }
 
     return !server->close_client_requested;
 }
 
-static bool tcpserver_consume_live_ack_wakeup(struct tcpserver *server) {
-    if (server == NULL || !server->client_connected || server->protocol_mode != TCPSERVER_PROTOCOL_LIVE) {
+static bool tcpserver_consume_ack_wakeup(struct tcpserver *server) {
+    if (server == NULL || !server->client_connected) {
         return false;
     }
 
-    return __atomic_exchange_n(&server->live.tx_ack_wakeup_pending, false, __ATOMIC_ACQ_REL);
+    switch (server->protocol_mode) {
+        case TCPSERVER_PROTOCOL_LIVE:
+            return __atomic_exchange_n(&server->live.tx_ack_wakeup_pending, false, __ATOMIC_ACQ_REL);
+        case TCPSERVER_PROTOCOL_MANAGEMENT:
+            return __atomic_exchange_n(&server->management.tx_ack_wakeup_pending, false, __ATOMIC_ACQ_REL);
+        default:
+            return false;
+    }
 }
 
 static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
@@ -204,6 +219,12 @@ static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
         server->live.tx_last_ack_len = len;
         server->live.tx_last_ack_us = time_us_64();
         __atomic_store_n(&server->live.tx_ack_wakeup_pending, true, __ATOMIC_RELEASE);
+    } else if (server != NULL && server->protocol_mode == TCPSERVER_PROTOCOL_MANAGEMENT) {
+        server->management.tx_ack_events++;
+        server->management.tx_acked_bytes += len;
+        server->management.tx_last_ack_len = len;
+        server->management.tx_last_ack_us = time_us_64();
+        __atomic_store_n(&server->management.tx_ack_wakeup_pending, true, __ATOMIC_RELEASE);
     }
 
     return ERR_OK;
@@ -430,7 +451,9 @@ bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_re
         tcpserver_complete_error_disconnect(server);
 
         if (server->client_connected) {
-            if (server->close_client_requested || !tcpserver_process_client(server)) {
+            bool made_progress = false;
+
+            if (server->close_client_requested || !tcpserver_process_client(server, &made_progress)) {
                 int error_code = server->last_error;
 
                 tcpserver_close_client(server);
@@ -439,9 +462,13 @@ bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_re
                 }
                 server->last_error = 0;
             }
+
+            if (made_progress) {
+                skip_sleep = true;
+            }
         }
 
-        skip_sleep = tcpserver_consume_live_ack_wakeup(server);
+        skip_sleep = skip_sleep || tcpserver_consume_ack_wakeup(server);
         if (!skip_sleep) {
             sleep_ms(1);
         }

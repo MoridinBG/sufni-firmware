@@ -9,16 +9,20 @@
 #include "../util/config.h"
 
 #define MANAGEMENT_PROTOCOL_MAGIC   0x544D474Du
-#define MANAGEMENT_PROTOCOL_VERSION 1u
+#define MANAGEMENT_PROTOCOL_VERSION 2u
 
 #define MANAGEMENT_PROTOCOL_CONFIG_NAME            "CONFIG"
 #define MANAGEMENT_PROTOCOL_CONFIG_STAGING_PATH    "CONFIG.TMP"
-#define MANAGEMENT_PROTOCOL_NAME_LENGTH            12u
-#define MANAGEMENT_PROTOCOL_FRAME_HEADER_SIZE      16u
-#define MANAGEMENT_PROTOCOL_MAX_CHUNK_PAYLOAD_SIZE 512u
-#define MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE         MANAGEMENT_PROTOCOL_MAX_CHUNK_PAYLOAD_SIZE
-#define MANAGEMENT_PROTOCOL_MAX_RX_FRAME_SIZE                                                                          \
-    (MANAGEMENT_PROTOCOL_FRAME_HEADER_SIZE + MANAGEMENT_PROTOCOL_MAX_CHUNK_PAYLOAD_SIZE)
+#define MANAGEMENT_PROTOCOL_NAME_LENGTH                   12u
+#define MANAGEMENT_PROTOCOL_FRAME_HEADER_SIZE             16u
+#define MANAGEMENT_PROTOCOL_CONTROL_MAX_PAYLOAD_SIZE      512u
+#define MANAGEMENT_PROTOCOL_MAX_UPLOAD_CHUNK_PAYLOAD_SIZE MANAGEMENT_PROTOCOL_CONTROL_MAX_PAYLOAD_SIZE
+#define MGMT_V2_MAX_FILE_CHUNK_PAYLOAD                    5824u
+#define MGMT_V2_TX_FRAME_BUFFER_SIZE                                                                                    \
+    (MANAGEMENT_PROTOCOL_FRAME_HEADER_SIZE + MGMT_V2_MAX_FILE_CHUNK_PAYLOAD)
+#define MANAGEMENT_PROTOCOL_IO_BUFFER_SIZE MGMT_V2_MAX_FILE_CHUNK_PAYLOAD
+#define MANAGEMENT_PROTOCOL_MAX_RX_FRAME_SIZE                                                                           \
+    (MANAGEMENT_PROTOCOL_FRAME_HEADER_SIZE + MANAGEMENT_PROTOCOL_CONTROL_MAX_PAYLOAD_SIZE)
 
 struct tcpserver;
 struct tcpserver_protocol_ops;
@@ -140,6 +144,7 @@ struct management_file_begin_frame {
     uint16_t reserved;
     int32_t record_id;
     uint64_t file_size;
+    uint32_t max_chunk_payload;
     char name[MANAGEMENT_PROTOCOL_NAME_LENGTH];
 } __attribute__((packed));
 
@@ -166,6 +171,14 @@ struct management_session {
     FILINFO list_fno;
     struct management_list_dir_entry_frame pending_list_entry;
 
+    bool diag_list_active;
+    uint32_t diag_list_request_id;
+    uint64_t diag_list_start_us;
+    uint64_t diag_list_scan_us;
+    uint32_t diag_list_files_visited;
+    uint32_t diag_list_config_entries;
+    uint32_t diag_list_sst_scans;
+
     bool file_open;
     FIL file;
     uint16_t file_class;
@@ -174,6 +187,26 @@ struct management_session {
     uint64_t file_offset;
     bool file_begin_sent;
     char file_name[MANAGEMENT_PROTOCOL_NAME_LENGTH];
+
+    bool diag_file_active;
+    uint32_t diag_file_request_id;
+    uint64_t diag_file_start_us;
+    uint64_t diag_file_last_tx_success_us;
+    uint64_t diag_file_max_tx_gap_us;
+    uint64_t diag_file_max_read_us;
+    uint64_t diag_file_bytes_read;
+    uint64_t diag_file_tx_bytes;
+    uint32_t diag_file_chunks_sent;
+    uint32_t diag_file_read_calls;
+    uint32_t diag_file_min_sndbuf;
+    uint32_t diag_file_sndbuf_blocked;
+    uint32_t diag_file_write_errors;
+
+    volatile bool tx_ack_wakeup_pending;
+    uint32_t tx_ack_events;
+    uint64_t tx_acked_bytes;
+    uint16_t tx_last_ack_len;
+    uint64_t tx_last_ack_us;
 
     bool upload_open;
     FIL upload_file;
@@ -193,7 +226,7 @@ struct management_session {
 
 void management_protocol_reset_session(struct tcpserver *server);
 bool management_protocol_process_rx(struct tcpserver *server);
-void management_protocol_service(struct tcpserver *server);
+bool management_protocol_service(struct tcpserver *server);
 bool management_protocol_needs_service(const struct tcpserver *server);
 
 extern const struct tcpserver_protocol_ops management_protocol_ops;

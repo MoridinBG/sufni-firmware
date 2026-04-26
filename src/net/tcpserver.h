@@ -25,7 +25,7 @@ struct tcpserver_protocol_ops {
     void (*on_disconnect)(struct tcpserver *server);
     bool (*detect)(const struct tcpserver *server);
     bool (*process_rx)(struct tcpserver *server);
-    void (*service)(struct tcpserver *server);
+    bool (*service)(struct tcpserver *server);
     bool (*needs_service)(const struct tcpserver *server);
 };
 
