@@ -199,13 +199,15 @@ static void core1_run_storage_backend(void) {
     core1_send_dispatch_event(CORE1_DISPATCH_EVENT_STORAGE_READY, 0);
 
     int status = storage_session_run();
+    enum core1_dispatch_event completion_event = CORE1_DISPATCH_EVENT_BACKEND_COMPLETE;
     if (status < 0) {
         core1_worker_status.last_error = status;
         core1_set_mode(CORE1_MODE_ERROR);
+        completion_event = CORE1_DISPATCH_EVENT_BACKEND_ERROR;
     }
 
     core1_set_mode(CORE1_MODE_IDLE);
-    core1_send_dispatch_event(CORE1_DISPATCH_EVENT_BACKEND_COMPLETE, status);
+    core1_send_dispatch_event(completion_event, status);
 }
 
 static void core1_run_tcp_backend(void) {

@@ -1,4 +1,5 @@
 #include "data_acquisition.h"
+#include "data_storage.h"
 
 #include "core1_ipc.h"
 #include "core1_worker.h"
@@ -35,6 +36,7 @@ static struct travel_record *active_travel_buffer = travel_databuffer1;
 static uint16_t travel_count = 0;
 static repeating_timer_t travel_timer;
 static ssd1306_t *recording_disp = NULL;
+static volatile bool recording_backend_failed = false;
 
 #if HAS_GPS
 static struct gps_record gps_databuffer1[GPS_BUFFER_SIZE];
@@ -57,34 +59,87 @@ static void recording_error(ssd1306_t *disp, const char *message) {
     while (true) { tight_loop_contents(); }
 }
 
+static void recording_handle_storage_failure(int32_t backend_status) {
+    if (recording_backend_failed) {
+        return;
+    }
+
+    recording_backend_failed = true;
+    if (storage_backend_status_is_fresult(backend_status)) {
+        LOG("REC", "Storage backend failed: FatFS %ld\n", (long)storage_backend_status_to_fresult(backend_status));
+    } else {
+        LOG("REC", "Storage backend failed: %ld\n", (long)backend_status);
+    }
+
+#if HAS_GPS
+    if (gps.available && !skip_gps_recording) {
+        gps.power_off(&gps);
+        LOG("REC", "GPS powered off\n");
+    }
+#endif
+
+    state = IDLE;
+    if (recording_disp != NULL) {
+        display_message(recording_disp, "FILE ERR");
+    }
+}
+
 static void storage_push_command(enum storage_session_command command) {
     multicore_fifo_push_blocking(CORE1_FIFO_WORD(CORE1_FIFO_FAMILY_STORAGE_CMD, command));
 }
 
-static void storage_expect_event(enum storage_session_event expected_event) {
+static bool storage_expect_event(enum storage_session_event expected_event) {
     uint32_t event_word = multicore_fifo_pop_blocking();
-    if (!core1_fifo_is_family(event_word, CORE1_FIFO_FAMILY_STORAGE_EVENT) ||
-        CORE1_FIFO_ID(event_word) != (uint32_t)expected_event) {
-        recording_error(recording_disp, "STO IPC ERR");
+
+    if (core1_fifo_is_family(event_word, CORE1_FIFO_FAMILY_STORAGE_EVENT)) {
+        if (CORE1_FIFO_ID(event_word) == (uint32_t)expected_event) {
+            return true;
+        }
+
+        recording_handle_storage_failure(PICO_ERROR_GENERIC);
+        return false;
     }
+
+    if (core1_fifo_is_family(event_word, CORE1_FIFO_FAMILY_DISPATCH_EVENT)) {
+        int32_t backend_status = (int32_t)multicore_fifo_pop_blocking();
+        recording_handle_storage_failure(backend_status);
+        return false;
+    }
+
+    recording_handle_storage_failure(PICO_ERROR_GENERIC);
+    return false;
 }
 
 // Hand the filled buffer to core 1 and receive the now-free alternate buffer back for subsequent samples.
-static void dump_active_travel_buffer(uint16_t size) {
+static bool dump_active_travel_buffer(uint16_t size) {
+    if (recording_backend_failed) {
+        return false;
+    }
+
     storage_push_command(STORAGE_CMD_DUMP_TRAVEL);
     multicore_fifo_push_blocking(size);
     multicore_fifo_push_blocking((uintptr_t)active_travel_buffer);
-    storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED);
+    if (!storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED)) {
+        return false;
+    }
     active_travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
+    return true;
 }
 
 #if HAS_GPS
-static void dump_gps_active_buffer(uint16_t size) {
+static bool dump_gps_active_buffer(uint16_t size) {
+    if (recording_backend_failed) {
+        return false;
+    }
+
     storage_push_command(STORAGE_CMD_DUMP_GPS);
     multicore_fifo_push_blocking(size);
     multicore_fifo_push_blocking((uintptr_t)gps_active_buffer);
-    storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED);
+    if (!storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED)) {
+        return false;
+    }
     gps_active_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
+    return true;
 }
 
 void recording_on_gps_fix(const struct gps_telemetry *telemetry) {
@@ -97,7 +152,9 @@ void recording_on_gps_fix(const struct gps_telemetry *telemetry) {
 
         if (state == RECORD) {
             if (gps_count == GPS_BUFFER_SIZE) {
-                dump_gps_active_buffer(GPS_BUFFER_SIZE);
+                if (!dump_gps_active_buffer(GPS_BUFFER_SIZE)) {
+                    return;
+                }
                 gps_count = 0;
             }
 
@@ -137,12 +194,19 @@ void recording_stop_gps_timer(void) { cancel_repeating_timer(&gps_timer); }
 #endif
 
 #if HAS_IMU
-static void dump_active_imu_buffer(uint16_t size) {
+static bool dump_active_imu_buffer(uint16_t size) {
+    if (recording_backend_failed) {
+        return false;
+    }
+
     storage_push_command(STORAGE_CMD_DUMP_IMU);
     multicore_fifo_push_blocking(size);
     multicore_fifo_push_blocking((uintptr_t)active_imu_buffer);
-    storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED);
+    if (!storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED)) {
+        return false;
+    }
     active_imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
+    return true;
 }
 
 static bool imu_cb(repeating_timer_t *rt) {
@@ -155,7 +219,9 @@ static bool imu_cb(repeating_timer_t *rt) {
         active_count++;
 
     if (imu_count + active_count > IMU_BUFFER_SIZE) {
-        dump_active_imu_buffer(imu_count);
+        if (!dump_active_imu_buffer(imu_count)) {
+            return false;
+        }
         imu_count = 0;
     }
 
@@ -197,7 +263,9 @@ static bool imu_cb(repeating_timer_t *rt) {
 
 static bool travel_cb(repeating_timer_t *rt) {
     if (travel_count == BUFFER_SIZE) {
-        dump_active_travel_buffer(BUFFER_SIZE);
+        if (!dump_active_travel_buffer(BUFFER_SIZE)) {
+            return false;
+        }
         travel_count = 0;
     }
     active_travel_buffer[travel_count].fork_angle = fork_sensor.measure(&fork_sensor);
@@ -207,10 +275,14 @@ static bool travel_cb(repeating_timer_t *rt) {
     if (marker_pending) {
         // Flush in-flight Travel/IMU before emitting MARKER
         // so it ends up between complete data batches in the SST stream.
-        dump_active_travel_buffer(travel_count);
+        if (!dump_active_travel_buffer(travel_count)) {
+            return false;
+        }
         travel_count = 0;
 #if HAS_IMU
-        dump_active_imu_buffer(imu_count);
+        if (!dump_active_imu_buffer(imu_count)) {
+            return false;
+        }
         imu_count = 0;
 #endif
 
@@ -234,7 +306,6 @@ void recording_reset_buffers(void) {
     active_imu_buffer = imu_databuffer1;
     imu_count = 0;
 #endif
-
 }
 
 // OPEN reserves the next SST file on core 1 and returns the inactive buffers that this core can start filling.
@@ -242,6 +313,7 @@ void recording_start(ssd1306_t *disp) {
     int32_t backend_status = 0;
     char msg[16];
 
+    recording_backend_failed = false;
     recording_disp = disp;
     sprintf(msg, "REC:%s|%s", fork_sensor.available ? "F" : ".", shock_sensor.available ? "S" : ".");
     display_message(disp, msg);
@@ -255,10 +327,17 @@ void recording_start(ssd1306_t *disp) {
     }
 
     storage_push_command(STORAGE_CMD_OPEN);
-    storage_expect_event(STORAGE_EVENT_OPEN_RESULT);
+    if (!storage_expect_event(STORAGE_EVENT_OPEN_RESULT)) {
+        recording_disp = NULL;
+        return;
+    }
     int index = (int)multicore_fifo_pop_blocking();
     if (index < 0) {
-        LOG("REC", "Failed to open data file\n");
+        if (storage_backend_status_is_fresult(index)) {
+            LOG("REC", "Failed to open data file: FatFS %ld\n", (long)storage_backend_status_to_fresult(index));
+        } else {
+            LOG("REC", "Failed to open data file: %d\n", index);
+        }
         recording_error(disp, "FILE ERR");
     }
 
@@ -294,14 +373,16 @@ void recording_stop(void) {
     int32_t backend_status = 0;
 
     cancel_repeating_timer(&travel_timer);
-    if (travel_count > 0) {
-        dump_active_travel_buffer(travel_count);
+    if (!recording_backend_failed && travel_count > 0 && !dump_active_travel_buffer(travel_count)) {
+        recording_disp = NULL;
+        return;
     }
 
 #if HAS_GPS
     cancel_repeating_timer(&gps_timer);
-    if (gps_count > 0) {
-        dump_gps_active_buffer(gps_count);
+    if (!recording_backend_failed && gps_count > 0 && !dump_gps_active_buffer(gps_count)) {
+        recording_disp = NULL;
+        return;
     }
     if (gps.available && !skip_gps_recording) {
         gps.power_off(&gps);
@@ -313,11 +394,17 @@ void recording_stop(void) {
     bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
     if (imu_active) {
         cancel_repeating_timer(&imu_timer);
-        if (imu_count > 0) {
-            dump_active_imu_buffer(imu_count);
+        if (!recording_backend_failed && imu_count > 0 && !dump_active_imu_buffer(imu_count)) {
+            recording_disp = NULL;
+            return;
         }
     }
 #endif
+
+    if (recording_backend_failed) {
+        recording_disp = NULL;
+        return;
+    }
 
     // FINISH only closes the file, so all remaining sensor chunks must already have been flushed.
     storage_push_command(STORAGE_CMD_FINISH);
