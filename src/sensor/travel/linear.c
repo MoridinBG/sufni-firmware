@@ -11,7 +11,12 @@ static bool linear_sensor_check_availability(struct travel_sensor *sensor) {
     return true; // XXX: AFAIK there is no way to check this for the ADC.
 }
 
-static bool linear_sensor_start(struct travel_sensor *sensor, uint16_t baseline, bool inverted) { return true; }
+static bool linear_sensor_start(struct travel_sensor *sensor, uint16_t baseline, bool inverted) {
+    sensor->baseline = baseline;
+    sensor->inverted = inverted;
+    sensor->available = true;
+    return true;
+}
 
 static uint16_t linear_sensor_measure(struct travel_sensor *sensor) {
     adc_select_input(sensor->comm.adc.adc_num);

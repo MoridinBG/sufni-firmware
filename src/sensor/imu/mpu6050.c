@@ -1,4 +1,5 @@
 #include "mpu6050.h"
+#include "../../util/i2c_safe.h"
 #include "../../util/log.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
@@ -6,6 +7,7 @@
 #include "pico/error.h"
 #include "pico/time.h"
 #include <stdio.h>
+#include <string.h>
 
 #define MPU6050_ADDR 0x68
 
@@ -17,33 +19,79 @@
 #define REG_PWR_MGMT_1   0x6B
 #define REG_WHO_AM_I     0x75
 
+#define SENSOR_I2C_BAUDRATE      1000000u
+#define I2C_RECOVERY_PULSE_COUNT 9u
+#define I2C_RECOVERY_DELAY_US    5u
+#define MPU6050_I2C_TIMEOUT_US   2000u
+
+static bool mpu6050_recover_bus(struct imu_sensor *imu) {
+    return i2c_recover_bus(imu->comm.i2c.instance, imu->comm.i2c.sda_gpio, imu->comm.i2c.scl_gpio, SENSOR_I2C_BAUDRATE,
+                           I2C_RECOVERY_PULSE_COUNT, I2C_RECOVERY_DELAY_US);
+}
+
+static void mpu6050_maybe_recover_timeout(struct imu_sensor *imu, int rc) {
+    if (rc != PICO_ERROR_TIMEOUT) {
+        return;
+    }
+
+    mpu6050_recover_bus(imu);
+}
+
 static void write_register(struct imu_sensor *imu, uint8_t reg, uint8_t data) {
     if (imu->protocol == IMU_PROTOCOL_I2C) {
         uint8_t buf[2] = {reg, data};
-        i2c_write_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 2, false);
+        int rc = i2c_write_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 2, false,
+                                              MPU6050_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            mpu6050_maybe_recover_timeout(imu, rc);
+        }
     }
 }
 
 static uint8_t read_register(struct imu_sensor *imu, uint8_t reg) {
     uint8_t buf[1] = {0};
     if (imu->protocol == IMU_PROTOCOL_I2C) {
-        i2c_write_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true);
-        i2c_read_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 1, false);
+        int rc = i2c_write_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true,
+                                              MPU6050_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            mpu6050_maybe_recover_timeout(imu, rc);
+            return 0;
+        }
+
+        rc = i2c_read_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, buf, 1, false,
+                                         MPU6050_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            mpu6050_maybe_recover_timeout(imu, rc);
+            return 0;
+        }
     }
     return buf[0];
 }
 
-static void read_registers(struct imu_sensor *imu, uint8_t reg, uint8_t *buf, size_t len) {
+static bool read_registers(struct imu_sensor *imu, uint8_t reg, uint8_t *buf, size_t len) {
     if (imu->protocol == IMU_PROTOCOL_I2C) {
-        i2c_write_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true);
-        i2c_read_blocking(imu->comm.i2c.instance, imu->comm.i2c.address, buf, len, false);
+        int rc = i2c_write_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, &reg, 1, true,
+                                              MPU6050_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            mpu6050_maybe_recover_timeout(imu, rc);
+            return false;
+        }
+
+        rc = i2c_read_timeout_bounded_us(imu->comm.i2c.instance, imu->comm.i2c.address, buf, len, false,
+                                         MPU6050_I2C_TIMEOUT_US);
+        if (rc < 0) {
+            mpu6050_maybe_recover_timeout(imu, rc);
+            return false;
+        }
     }
+
+    return true;
 }
 
 void mpu6050_init(struct imu_sensor *imu) {
     if (imu->protocol == IMU_PROTOCOL_I2C) {
         // MPU6050 usually runs at 400kHz, but my unit appears to init & read fine @1Mhz
-        i2c_init(imu->comm.i2c.instance, 1000000);
+        i2c_init(imu->comm.i2c.instance, SENSOR_I2C_BAUDRATE);
         gpio_set_function(imu->comm.i2c.sda_gpio, GPIO_FUNC_I2C);
         gpio_set_function(imu->comm.i2c.scl_gpio, GPIO_FUNC_I2C);
         gpio_pull_up(imu->comm.i2c.sda_gpio);
@@ -92,8 +140,11 @@ bool mpu6050_check_availability(struct imu_sensor *imu) {
 }
 
 void mpu6050_read_raw(struct imu_sensor *imu, int16_t raw[6]) {
-    uint8_t buffer[14];
-    read_registers(imu, REG_ACCEL_XOUT_H, buffer, 14);
+    uint8_t buffer[14] = {0};
+    if (!read_registers(imu, REG_ACCEL_XOUT_H, buffer, 14)) {
+        memset(raw, 0, sizeof(int16_t) * 6);
+        return;
+    }
 
     // MPU6050 outputs are Big-Endian
     raw[0] = (int16_t)(buffer[0] << 8 | buffer[1]); // ax
@@ -106,8 +157,10 @@ void mpu6050_read_raw(struct imu_sensor *imu, int16_t raw[6]) {
 }
 
 int16_t mpu6050_read_temperature(struct imu_sensor *imu) {
-    uint8_t buffer[2];
-    read_registers(imu, REG_TEMP_OUT_H, buffer, 2);
+    uint8_t buffer[2] = {0};
+    if (!read_registers(imu, REG_TEMP_OUT_H, buffer, 2)) {
+        return 0;
+    }
     return (int16_t)(buffer[0] << 8 | buffer[1]);
 }
 

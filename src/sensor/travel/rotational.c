@@ -1,12 +1,24 @@
+#include "hardware/gpio.h"
 #include "hardware/i2c.h"
 
+#include "../../util/i2c_safe.h"
 #include "../fw/hardware_config.h"
 #include "as5600.h"
+#include "pico/time.h"
 #include "travel_sensor.h"
 #include <stdint.h>
 
+#define SENSOR_I2C_BAUDRATE      1000000u
+#define I2C_RECOVERY_PULSE_COUNT 9u
+#define I2C_RECOVERY_DELAY_US    5u
+
+static bool rotational_sensor_recover_bus(struct travel_sensor *sensor) {
+    return i2c_recover_bus(sensor->comm.i2c.instance, sensor->comm.i2c.sda_gpio, sensor->comm.i2c.scl_gpio,
+                           SENSOR_I2C_BAUDRATE, I2C_RECOVERY_PULSE_COUNT, I2C_RECOVERY_DELAY_US);
+}
+
 static void rotational_sensor_init(struct travel_sensor *sensor) {
-    i2c_init(sensor->comm.i2c.instance, 1000000);
+    i2c_init(sensor->comm.i2c.instance, SENSOR_I2C_BAUDRATE);
     gpio_set_function(sensor->comm.i2c.sda_gpio, GPIO_FUNC_I2C);
     gpio_set_function(sensor->comm.i2c.scl_gpio, GPIO_FUNC_I2C);
     gpio_pull_up(sensor->comm.i2c.sda_gpio);
@@ -38,9 +50,14 @@ static bool rotational_sensor_start(struct travel_sensor *sensor, uint16_t basel
 }
 
 static uint16_t rotational_sensor_measure(struct travel_sensor *sensor) {
-    static uint16_t value = 0xffff;
+    uint16_t value = 0xffff;
+
     if (sensor->available) {
         value = as5600_get_scaled_angle(sensor->comm.i2c.instance);
+        if (value == 0xffff) {
+            rotational_sensor_recover_bus(sensor);
+            return 0xffff;
+        }
         if (sensor->inverted) {
             value = 4096 - value;
         }
@@ -51,8 +68,12 @@ static uint16_t rotational_sensor_measure(struct travel_sensor *sensor) {
 
 static void rotational_sensor_calibrate_expanded(struct travel_sensor *sensor) {
     sensor->baseline = 0xffff;
+
     if (sensor->check_availability(sensor)) {
         sensor->baseline = as5600_get_raw_angle(sensor->comm.i2c.instance);
+        if (sensor->baseline == 0xffff) {
+            return;
+        }
         as5600_set_start_position(sensor->comm.i2c.instance, sensor->baseline);
     }
 }

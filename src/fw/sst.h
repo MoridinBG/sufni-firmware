@@ -1,7 +1,8 @@
 #ifndef _SST_H
 #define _SST_H
 
-#include "../net/tcpclient.h"
+#include <time.h>
+
 #include "../ui/pushbutton.h"
 #include "as5600.h"
 #include "hardware_config.h"
@@ -78,8 +79,6 @@ struct imu_record {
     int16_t gx, gy, gz;
 };
 
-enum command { OPEN, DUMP_TRAVEL, DUMP_GPS, DUMP_IMU, FINISH, MARKER };
-
 #define BUFFER_SIZE     2048
 #define GPS_BUFFER_SIZE 30
 
@@ -90,4 +89,14 @@ enum command { OPEN, DUMP_TRAVEL, DUMP_GPS, DUMP_IMU, FINISH, MARKER };
 #define FILENAME_LENGTH                                                                                                \
     10 // filename is always in 00000.SST format,
        // so length is always 10.
+
+// Metadata extracted from an SST file
+struct sst_file_info {
+    time_t timestamp;
+    uint32_t duration_ms;
+    uint8_t version;
+};
+
+struct sst_file_info sst_get_file_info(const char *path);
+
 #endif /* _SST_H */

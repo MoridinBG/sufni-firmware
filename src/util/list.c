@@ -1,3 +1,6 @@
+#include <stdlib.h>
+#include <string.h>
+
 #include "list.h"
 
 static struct node *node_create(const char data[FILENAME_LENGTH]) {

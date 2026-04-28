@@ -23,6 +23,7 @@
 #include "hardware/structs/scb.h"
 
 #include "../net/tcpserver.h"
+#include "../net/wifi.h"
 #include "../ntp//ntp.h"
 #include "../rtc//ds3231.h"
 #include "../sensor/travel/travel_sensor.h"
@@ -31,16 +32,19 @@
 #include "../util/list.h"
 #include "../util/log.h"
 #include "calibration_flow.h"
+#include "core1_worker.h"
 #include "data_acquisition.h"
 #include "data_storage.h"
-#include "data_sync.h"
 #include "display.h"
 #include "fw_init.h"
 #include "fw_state.h"
 #include "helpers.h"
+#include "live_core0_session.h"
 #include "sensor_setup.h"
 #include "sst.h"
 #include "state_views.h"
+
+#include "../net/management_protocol.h"
 
 #include "hardware_config.h"
 
@@ -58,7 +62,7 @@ volatile float gps_last_epe = 0.0f;
 static struct fw_power_state power_state;
 
 static ssd1306_t disp;
-static struct tcpserver server;
+static volatile bool tcp_session_stop_requested = false;
 
 struct ds3231 rtc;
 
@@ -148,11 +152,6 @@ static void on_rec_stop() {
     state = IDLE;
     display_message(&disp, "IDLE");
     recording_stop();
-}
-
-static void on_sync_data() {
-    sync_recorded_data(&disp);
-    state = IDLE;
 }
 
 static void on_idle() {
@@ -246,18 +245,112 @@ static void on_disabled_gps() { tight_loop_contents(); }
 // RECORD work runs from acquisition timers after recording_start, so the main loop only idles here.
 static void on_rec() { tight_loop_contents(); }
 
-static void on_serve_tcp() {
-    display_message(&disp, "CONNECT");
-    if (!wifi_connect(true)) {
-        display_message(&disp, "CONN ERR");
-        sleep_ms(1000);
-    } else if (tcpserver_init(&server)) {
-        display_message(&disp, "SERVER ON");
-        tcpserver_serve(&server);
+static const char *tcp_session_status_subtitle(enum state session_state, enum network_client_status client_status) {
+    if (session_state != SERVE_TCP) {
+        return NULL;
     }
-    wifi_disconnect();
+
+    switch (client_status) {
+        case NETWORK_CLIENT_CONNECTED:
+            return "connected";
+        case NETWORK_CLIENT_LIVE:
+            return "live";
+        case NETWORK_CLIENT_MANAGEMENT:
+            return "mgmt";
+        default:
+            return NULL;
+    }
+}
+
+static void display_tcp_session_status(const char *ready_message, const char *subtitle) {
+    if (subtitle != NULL) {
+        display_message_with_subtitle(&disp, ready_message, subtitle);
+    } else {
+        display_message(&disp, ready_message);
+    }
+}
+
+static void run_tcp_session(enum state session_state, const char *ready_message, bool allow_live_preview) {
+    struct core1_network_session_config session_request = {
+        .session_kind = session_state == SERVE_TCP ? CORE1_NETWORK_SESSION_SERVE_TCP : CORE1_NETWORK_SESSION_SYNC_DATA,
+        .run_ntp = true,
+        .allow_live_preview = allow_live_preview,
+        .enable_mdns = true,
+    };
+    struct core1_network_session_status session_status = {0};
+    uint32_t request_generation = 0;
+    bool session_running = false;
+    bool startup_failed = false;
+    enum network_client_status displayed_client_status = NETWORK_CLIENT_NONE;
+
+    tcp_session_stop_requested = false;
+    session_request.config_snapshot = config;
+    display_message(&disp, "CONNECT");
+    if (!core1_request_network_session_start(&session_request, &request_generation)) {
+        display_message(&disp, "SRV BUSY");
+        sleep_ms(1000);
+        state = IDLE;
+        return;
+    }
+
+    while (state == session_state) {
+        if (allow_live_preview) {
+            live_stream_core0_service();
+        }
+
+        if (core1_read_network_session_status(&session_status) &&
+            session_status.request_generation == request_generation) {
+            if (!session_running && session_status.phase == NETWORK_SESSION_PHASE_RUNNING) {
+                displayed_client_status = session_status.client_status;
+                display_tcp_session_status(ready_message,
+                                           tcp_session_status_subtitle(session_state, displayed_client_status));
+                session_running = true;
+            }
+
+            if (session_running && session_status.phase == NETWORK_SESSION_PHASE_RUNNING) {
+                if (session_status.client_status != displayed_client_status) {
+                    displayed_client_status = session_status.client_status;
+                    display_tcp_session_status(ready_message,
+                                               tcp_session_status_subtitle(session_state, displayed_client_status));
+                }
+            }
+
+            if (session_status.phase == NETWORK_SESSION_PHASE_COMPLETED ||
+                session_status.phase == NETWORK_SESSION_PHASE_CANCELLED ||
+                session_status.phase == NETWORK_SESSION_PHASE_ERROR) {
+                startup_failed = !session_running && session_status.phase == NETWORK_SESSION_PHASE_ERROR;
+                break;
+            }
+        }
+
+        if (tcp_session_stop_requested) {
+            if (allow_live_preview) {
+                live_stream_core0_stop();
+            }
+            if (session_status.request_generation == request_generation && session_status.session_id != 0 &&
+                core1_request_network_session_stop(session_status.session_id, NULL)) {
+                tcp_session_stop_requested = false;
+            }
+        }
+
+        tight_loop_contents();
+        sleep_ms(1);
+    }
+
+    if (startup_failed) {
+        display_message(&disp, session_status.error_code == NETWORK_SESSION_ERR_WIFI_START ? "CONN ERR" : "SRV ERR");
+        sleep_ms(1000);
+    }
+
+    if (allow_live_preview) {
+        live_stream_core0_stop();
+    }
     state = IDLE;
 }
+
+static void on_serve_tcp() { run_tcp_session(SERVE_TCP, "SERVER ON", true); }
+
+static void on_sync_data() { run_tcp_session(SYNC_DATA, "READY DL", false); }
 
 static void (*state_handlers[STATES_COUNT])() = {
     on_idle,      /* IDLE */
@@ -321,8 +414,10 @@ static void on_right_press(void *user_data) {
             LOG("REC", "Marker set\n");
             break;
         case SERVE_TCP:
-            tcpserver_finish(&server);
-            state = IDLE;
+            tcp_session_stop_requested = true;
+            break;
+        case SYNC_DATA:
+            tcp_session_stop_requested = true;
             break;
         default:
             break;

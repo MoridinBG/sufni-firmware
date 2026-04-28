@@ -11,6 +11,13 @@ void display_message(ssd1306_t *disp, const char *message) {
     ssd1306_show(disp);
 }
 
+void display_message_with_subtitle(ssd1306_t *disp, const char *message, const char *subtitle) {
+    ssd1306_clear(disp);
+    ssd1306_draw_string(disp, 0, 0, 2, message);
+    ssd1306_draw_string(disp, 0, 24, 1, subtitle);
+    ssd1306_show(disp);
+}
+
 void setup_display(ssd1306_t *disp) {
 #ifdef SPI_DISPLAY
     spi_init(DISPLAY_SPI, 1000000);

@@ -4,10 +4,13 @@
 #include "bsp/board.h"
 #endif
 
+#include "core1_worker.h"
 #include "data_acquisition.h"
 #include "data_storage.h"
 #include "display.h"
 #include "helpers.h"
+#include "live_core0_session.h"
+#include "live_watchdog_diag.h"
 #include "sensor_setup.h"
 
 #include "../ntp/ntp.h"
@@ -57,7 +60,7 @@ static void init_travel_sensors(void) {
 
 #if HAS_GPS
 static void init_gps_sensor(void) {
-    gps.on_fix = recording_on_gps_fix;
+    gps.on_fix = gps_fix_router_on_fix;
     if (gps_sensor_init(&gps)) {
         LOG("INIT", "GPS initialized\n");
         if (!gps_sensor_configure(&gps, 1000 / GPS_SAMPLE_RATE, true, true, true, true, false)) {
@@ -105,7 +108,7 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
     sleep_ms(1);
 
     LOG("DS3231", "Reading datetime\n");
-    if (!ds3231_get_datetime(&rtc, &tm_now)) {
+    if (!ds3231_get_datetime(rtc, &tm_now)) {
         LOG("DS3231", "RTC not connected, defaulting to 2000-01-01 00:00\n");
         tm_now = (struct tm){.tm_year = 100, .tm_mon = 0, .tm_mday = 1};
     }
@@ -114,7 +117,6 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
 
 #if PICO_RP2040
     if (!aon_timer_start_calendar(&tm_now)) {
-        setup_display(disp);
         halt_with_message(disp, "AON ERR");
     }
 #else
@@ -123,7 +125,6 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
     time_t epoch = mktime(&tm_now);
     struct timespec ts = {.tv_sec = epoch, .tv_nsec = 0};
     if (!aon_timer_start(&ts)) {
-        setup_display(disp);
         halt_with_message(disp, "AON ERR");
     }
 #endif
@@ -132,7 +133,6 @@ static void init_rtc_and_aon_timer(ssd1306_t *disp, struct ds3231 *rtc) {
 static void init_storage(ssd1306_t *disp) {
     int err = setup_storage();
     if (err < 0) {
-        setup_display(disp);
         halt_with_message(disp, "CARD ERR");
     }
     LOG("INIT", "Storage initialized\n");
@@ -144,8 +144,8 @@ static void init_runtime(ssd1306_t *disp) {
     }
     LOG("INIT", "Config loaded\n");
 
-    setup_ntp(config.ntp_server);
     cyw43_arch_init_with_country(config.country);
+    setup_ntp(config.ntp_server);
     setenv("TZ", config.timezone, 1);
     tzset();
     LOG("INIT", "WiFi initialized, country=%d, timezone=%s\n", config.country, config.timezone);
@@ -181,9 +181,12 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
                    struct fw_power_state *power_state, const struct fw_button_handlers *button_handlers) {
     init_board_io();
     init_pio_i2c_bus();
+    setup_display(disp);
+    display_message(disp, "INIT");
     init_rtc_and_aon_timer(disp, rtc);
     init_storage(disp);
     log_init();
+    live_watchdog_diag_init();
 
     init_travel_sensors();
 #if HAS_GPS
@@ -192,7 +195,6 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
 #if HAS_IMU
     init_imu_sensors();
 #endif
-    setup_display(disp);
 
 #ifndef USB_UART_DEBUG
     if (msc_present()) {
@@ -203,7 +205,7 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
     }
 #endif
 
-    multicore_launch_core1(&sd_writer_main);
+    multicore_launch_core1(&core1_worker_main);
     init_runtime(disp);
 
     // Sleep/wake restores these registers after deep sleep, so capture the post-init baseline once here.

@@ -4,6 +4,7 @@
 #include "display.h"
 #include "hardware_config.h"
 #include "helpers.h"
+#include "sensor_setup.h"
 
 #include "hardware/gpio.h"
 #include "pico/time.h"
@@ -149,6 +150,36 @@ static void copy_data_to_imu_cal(struct imu_cal_data *data, struct imu_sensor *i
     imu->calibration.cal_temperature = data->cal_temperature;
 }
 
+static void apply_loaded_calibration(struct calibration_ctx *ctx, const struct calibration_data *data) {
+    ctx->fork->check_availability(ctx->fork);
+    ctx->shock->check_availability(ctx->shock);
+
+    ctx->fork->start(ctx->fork, data->travel.fork_baseline, data->travel.fork_inverted != 0);
+    ctx->shock->start(ctx->shock, data->travel.shock_baseline, data->travel.shock_inverted != 0);
+
+    LOG("CAL", "Fork sensor: baseline=0x%04x, inverted=%d, available=%d\n", data->travel.fork_baseline,
+        data->travel.fork_inverted, ctx->fork->available);
+    LOG("CAL", "Shock sensor: baseline=0x%04x, inverted=%d, available=%d\n", data->travel.shock_baseline,
+        data->travel.shock_inverted, ctx->shock->available);
+
+#if HAS_IMU
+    if (ctx->imu_frame && imu_sensor_available(ctx->imu_frame) && data->imu_frame.present) {
+        copy_data_to_imu_cal((struct imu_cal_data *)&data->imu_frame, ctx->imu_frame);
+        LOG("CAL", "Frame IMU calibration applied\n");
+    }
+
+    if (ctx->imu_fork && imu_sensor_available(ctx->imu_fork) && data->imu_fork.present) {
+        copy_data_to_imu_cal((struct imu_cal_data *)&data->imu_fork, ctx->imu_fork);
+        LOG("CAL", "Fork IMU calibration applied\n");
+    }
+
+    if (ctx->imu_rear && imu_sensor_available(ctx->imu_rear) && data->imu_rear.present) {
+        copy_data_to_imu_cal((struct imu_cal_data *)&data->imu_rear, ctx->imu_rear);
+        LOG("CAL", "Rear IMU calibration applied\n");
+    }
+#endif
+}
+
 static bool do_imu_tilt(struct calibration_ctx *ctx) {
     display_message(ctx->disp, "IMU TILT..");
     LOG("CAL", "Starting IMU tilt calibration\n");
@@ -287,30 +318,28 @@ bool calibration_apply_to_sensors(struct calibration_ctx *ctx) {
         return false;
     }
 
-    // Apply travel calibration
-    ctx->fork->start(ctx->fork, data.travel.fork_baseline, data.travel.fork_inverted != 0);
-    ctx->shock->start(ctx->shock, data.travel.shock_baseline, data.travel.shock_inverted != 0);
-
-    LOG("CAL", "Fork sensor: baseline=0x%04x, inverted=%d, available=%d\n", data.travel.fork_baseline,
-        data.travel.fork_inverted, ctx->fork->available);
-    LOG("CAL", "Shock sensor: baseline=0x%04x, inverted=%d, available=%d\n", data.travel.shock_baseline,
-        data.travel.shock_inverted, ctx->shock->available);
-
-    // Apply IMU calibrations
-    if (data.imu_frame.present && ctx->imu_frame && ctx->imu_frame->available) {
-        copy_data_to_imu_cal(&data.imu_frame, ctx->imu_frame);
-        LOG("CAL", "Frame IMU calibration applied\n");
-    }
-
-    if (data.imu_fork.present && ctx->imu_fork && ctx->imu_fork->available) {
-        copy_data_to_imu_cal(&data.imu_fork, ctx->imu_fork);
-        LOG("CAL", "Fork IMU calibration applied\n");
-    }
-
-    if (data.imu_rear.present && ctx->imu_rear && ctx->imu_rear->available) {
-        copy_data_to_imu_cal(&data.imu_rear, ctx->imu_rear);
-        LOG("CAL", "Rear IMU calibration applied\n");
-    }
+    apply_loaded_calibration(ctx, &data);
 
     return ctx->fork->available || ctx->shock->available;
+}
+
+bool calibration_refresh_active_sensors(void) {
+    struct calibration_data data;
+    struct calibration_ctx ctx = {
+        .fork = &fork_sensor,
+        .shock = &shock_sensor,
+#if HAS_IMU
+        .imu_frame = &imu_frame,
+        .imu_fork = &imu_fork,
+        .imu_rear = &imu_rear,
+#endif
+        .disp = NULL,
+    };
+
+    if (!calibration_load(&data)) {
+        return false;
+    }
+
+    apply_loaded_calibration(&ctx, &data);
+    return true;
 }

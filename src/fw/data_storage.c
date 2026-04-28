@@ -1,6 +1,8 @@
 #include "data_storage.h"
 #include "data_acquisition.h"
 
+#include "core1_ipc.h"
+
 #include "sensor_setup.h"
 #include "sst.h"
 
@@ -12,10 +14,31 @@
 #include "pico/platform.h"
 #include "pico/unique_id.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
 static FIL recording;
+static bool recording_open = false;
+
+static void storage_send_event(enum storage_session_event event_id) {
+    multicore_fifo_push_blocking(CORE1_FIFO_WORD(CORE1_FIFO_FAMILY_STORAGE_EVENT, event_id));
+}
+
+static FRESULT write_exact(const void *buf, UINT n) {
+    UINT bw;
+    FRESULT fr = f_write(&recording, buf, n, &bw);
+    return fr != FR_OK ? fr : (bw == n ? FR_OK : FR_DISK_ERR);
+}
+
+static int fail_session(const char *what, FRESULT fr) {
+    if (recording_open) {
+        f_close(&recording);
+        recording_open = false;
+    }
+    LOG("STORAGE", "%s failed: %d\n", what, fr);
+    return storage_backend_status_from_fresult(fr);
+}
 
 int setup_storage(void) {
     static FATFS fs;
@@ -77,25 +100,31 @@ static int open_datafile(void) {
     LOG("STORAGE", "Creating file: %s\n", filename);
     fr = f_open(&recording, filename, FA_CREATE_NEW | FA_WRITE);
     if (fr != FR_OK) {
-        return fr;
+        LOG("STORAGE", "Failed to open %s: %d\n", filename, fr);
+        return storage_backend_status_from_fresult(fr);
     }
+    recording_open = true;
 
     struct sst_header h = {"SST", 4, 0, rtc_timestamp()};
-    f_write(&recording, &h, sizeof(struct sst_header), NULL);
+    fr = write_exact(&h, sizeof(h));
 
 #if HAS_IMU
     struct chunk_header ch = {CHUNK_TYPE_RATES, 2 * sizeof(struct samplerate_record)};
 #else
     struct chunk_header ch = {CHUNK_TYPE_RATES, 1 * sizeof(struct samplerate_record)};
 #endif
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
+    if (fr == FR_OK)
+        fr = write_exact(&ch, sizeof(ch));
+
     struct samplerate_record re = {CHUNK_TYPE_TRAVEL, TRAVEL_SAMPLE_RATE};
-    f_write(&recording, &re, sizeof(struct samplerate_record), NULL);
+    if (fr == FR_OK)
+        fr = write_exact(&re, sizeof(re));
 
 #if HAS_IMU
     re.type = CHUNK_TYPE_IMU;
     re.rate = IMU_SAMPLE_RATE;
-    f_write(&recording, &re, sizeof(struct samplerate_record), NULL);
+    if (fr == FR_OK)
+        fr = write_exact(&re, sizeof(re));
 
     uint8_t imu_meta_count = 0;
     if (imu_frame.available)
@@ -105,65 +134,67 @@ static int open_datafile(void) {
     if (imu_rear.available)
         imu_meta_count++;
 
-    if (imu_meta_count > 0) {
+    if (fr == FR_OK && imu_meta_count > 0) {
         ch.type = CHUNK_TYPE_IMU_META;
         ch.length = 1 + imu_meta_count * sizeof(struct imu_meta_record);
-        f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-        f_write(&recording, &imu_meta_count, 1, NULL);
+        if (fr == FR_OK)
+            fr = write_exact(&ch, sizeof(ch));
+        if (fr == FR_OK)
+            fr = write_exact(&imu_meta_count, 1);
 
-        if (imu_frame.available) {
+        if (fr == FR_OK && imu_frame.available) {
             struct imu_meta_record entry = {0, imu_frame.accel_lsb_per_g, imu_frame.gyro_lsb_per_dps};
-            f_write(&recording, &entry, sizeof(struct imu_meta_record), NULL);
+            fr = write_exact(&entry, sizeof(entry));
         }
-        if (imu_fork.available) {
+        if (fr == FR_OK && imu_fork.available) {
             struct imu_meta_record entry = {1, imu_fork.accel_lsb_per_g, imu_fork.gyro_lsb_per_dps};
-            f_write(&recording, &entry, sizeof(struct imu_meta_record), NULL);
+            fr = write_exact(&entry, sizeof(entry));
         }
-        if (imu_rear.available) {
+        if (fr == FR_OK && imu_rear.available) {
             struct imu_meta_record entry = {2, imu_rear.accel_lsb_per_g, imu_rear.gyro_lsb_per_dps};
-            f_write(&recording, &entry, sizeof(struct imu_meta_record), NULL);
+            fr = write_exact(&entry, sizeof(entry));
         }
     }
 #endif
 
+    if (fr == FR_OK)
+        fr = f_sync(&recording);
+
+    if (fr != FR_OK) {
+        f_close(&recording);
+        recording_open = false;
+        f_unlink(filename);
+        LOG("STORAGE", "Failed to initialize %s: %d\n", filename, fr);
+        return storage_backend_status_from_fresult(fr);
+    }
     return index;
 }
 
-static void write_travel_chunk(uint16_t size, struct travel_record *buffer) {
-    struct chunk_header ch;
-    ch.type = CHUNK_TYPE_TRAVEL;
-    ch.length = size * sizeof(struct travel_record);
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    f_write(&recording, buffer, ch.length, NULL);
-    f_sync(&recording);
+static FRESULT write_chunk(uint8_t type, const void *payload, uint16_t bytes) {
+    FSIZE_t start = f_tell(&recording);
+    struct chunk_header ch = {type, bytes};
+    FRESULT fr = write_exact(&ch, sizeof(ch));
+    if (fr == FR_OK && bytes > 0) {
+        fr = write_exact(payload, bytes);
+    }
+    if (fr != FR_OK) {
+        FRESULT rollback_fr = f_lseek(&recording, start);
+        if (rollback_fr == FR_OK) {
+            rollback_fr = f_truncate(&recording);
+        }
+        if (rollback_fr == FR_OK) {
+            rollback_fr = f_sync(&recording);
+        }
+        return rollback_fr == FR_OK ? fr : rollback_fr;
+    }
+    return f_sync(&recording);
 }
 
-#if HAS_GPS
-static void write_gps_chunk(uint16_t size, struct gps_record *buffer) {
-    struct chunk_header ch;
-    ch.type = CHUNK_TYPE_GPS;
-    ch.length = size * sizeof(struct gps_record);
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    f_write(&recording, buffer, ch.length, NULL);
-    f_sync(&recording);
-}
-#endif
-
-#if HAS_IMU
-static void write_imu_chunk(uint16_t size, struct imu_record *buffer) {
-    struct chunk_header ch;
-    ch.type = CHUNK_TYPE_IMU;
-    ch.length = size * sizeof(struct imu_record);
-    f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-    f_write(&recording, buffer, ch.length, NULL);
-    f_sync(&recording);
-}
-#endif
-
-void sd_writer_main(void) {
-    int index;
-    enum command cmd;
+int storage_session_run(void) {
+    int index = 0;
+    uint32_t command_word;
     uint16_t size;
+    FRESULT fr;
     struct travel_record *travel_buffer;
 #if HAS_GPS
     struct gps_record *gps_buffer;
@@ -171,14 +202,17 @@ void sd_writer_main(void) {
 #if HAS_IMU
     struct imu_record *imu_buffer;
 #endif
-    struct chunk_header ch;
 
     while (true) {
-        cmd = (enum command)multicore_fifo_pop_blocking();
-        switch (cmd) {
-            case OPEN:
-                multicore_fifo_drain();
+        command_word = multicore_fifo_pop_blocking();
+        if (!core1_fifo_is_family(command_word, CORE1_FIFO_FAMILY_STORAGE_CMD)) {
+            return fail_session("Non-storage FIFO word", FR_INT_ERR);
+        }
+
+        switch (CORE1_FIFO_ID(command_word)) {
+            case STORAGE_CMD_OPEN:
                 index = open_datafile();
+                storage_send_event(STORAGE_EVENT_OPEN_RESULT);
                 multicore_fifo_push_blocking(index);
                 multicore_fifo_push_blocking((uintptr_t)travel_databuffer2);
 #if HAS_IMU
@@ -188,37 +222,54 @@ void sd_writer_main(void) {
                 multicore_fifo_push_blocking((uintptr_t)gps_databuffer2);
 #endif
                 break;
-            case DUMP_TRAVEL:
+            case STORAGE_CMD_DUMP_TRAVEL:
                 size = (uint16_t)multicore_fifo_pop_blocking();
                 travel_buffer = (struct travel_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
                 multicore_fifo_push_blocking((uintptr_t)travel_buffer);
-                write_travel_chunk(size, travel_buffer);
+                fr = write_chunk(CHUNK_TYPE_TRAVEL, travel_buffer, (uint16_t)(size * sizeof(*travel_buffer)));
+                if (fr != FR_OK)
+                    return fail_session("Write travel chunk", fr);
                 break;
 #if HAS_GPS
-            case DUMP_GPS:
+            case STORAGE_CMD_DUMP_GPS:
                 size = (uint16_t)multicore_fifo_pop_blocking();
                 gps_buffer = (struct gps_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
                 multicore_fifo_push_blocking((uintptr_t)gps_buffer);
-                write_gps_chunk(size, gps_buffer);
+                fr = write_chunk(CHUNK_TYPE_GPS, gps_buffer, (uint16_t)(size * sizeof(*gps_buffer)));
+                if (fr != FR_OK)
+                    return fail_session("Write GPS chunk", fr);
                 break;
 #endif
 #if HAS_IMU
-            case DUMP_IMU:
+            case STORAGE_CMD_DUMP_IMU:
                 size = (uint16_t)multicore_fifo_pop_blocking();
                 imu_buffer = (struct imu_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
                 multicore_fifo_push_blocking((uintptr_t)imu_buffer);
-                write_imu_chunk(size, imu_buffer);
+                fr = write_chunk(CHUNK_TYPE_IMU, imu_buffer, (uint16_t)(size * sizeof(*imu_buffer)));
+                if (fr != FR_OK)
+                    return fail_session("Write IMU chunk", fr);
                 break;
 #endif
-            case MARKER:
-                ch.type = CHUNK_TYPE_MARKER;
-                ch.length = 0;
-                f_write(&recording, &ch, sizeof(struct chunk_header), NULL);
-                f_sync(&recording);
+            case STORAGE_CMD_MARKER:
+                fr = write_chunk(CHUNK_TYPE_MARKER, NULL, 0);
+                if (fr != FR_OK)
+                    return fail_session("Write marker chunk", fr);
                 break;
-            case FINISH:
-                f_close(&recording);
-                break;
+            case STORAGE_CMD_FINISH:
+                if (recording_open) {
+                    fr = f_close(&recording);
+                    recording_open = false;
+                    if (fr != FR_OK) {
+                        LOG("STORAGE", "Close failed: %d\n", fr);
+                        return storage_backend_status_from_fresult(fr);
+                    }
+                }
+                return 0;
+            default:
+                return fail_session("Unknown storage command", FR_INT_ERR);
         }
     }
 }

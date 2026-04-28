@@ -14,6 +14,7 @@ void setup_ntp(const char *server);
 
 time_t rtc_timestamp();
 uint64_t get_system_time_us();
+bool set_system_time_utc(time_t epoch_seconds, uint32_t micros);
 bool sync_rtc_to_ntp();
 
 #endif /* _NTP_H */

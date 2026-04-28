@@ -34,30 +34,42 @@ pico_sdk_init()
 
 add_executable(sufni-suspension-telemetry
     src/fw/main.c
+    src/fw/core1_worker.c
     src/fw/fw_init.c
     src/fw/data_acquisition.c
-    src/fw/data_sync.c
     src/fw/data_storage.c
     src/fw/display.c
     src/fw/helpers.c
+    src/fw/live_stream_shared.c
+    src/fw/live_core0_session.c
+    src/fw/live_watchdog_diag.c
     src/fw/sensor_setup.c
     src/fw/state_views.c
     src/fw/calibration_storage.c
     src/fw/calibration_flow.c
+    src/fw/sst.c
     src/fs/microsd.c
-    src/net/tcpclient.c
+    src/net/dhcpserver.c
     src/net/tcpserver.c
+    src/net/wifi.c
+    src/net/live_core1_protocol.c
+    src/net/management_protocol.c
     src/ntp/ntp.c
     src/pio_i2c/pio_i2c.c
     src/rtc/ds3231.c
     src/ui/pushbutton.c
     src/util/config.c
+    src/util/i2c_safe.c
     src/util/log.c
     src/util/list.c
     src/sensor/travel/rotational.c
     src/sensor/travel/linear.c
     src/sensor/imu/imu_sensor.c
 )
+
+pico_configure_ip4_address(sufni-suspension-telemetry PRIVATE CYW43_DEFAULT_IP_AP_ADDRESS "192.168.4.1")
+pico_configure_ip4_address(sufni-suspension-telemetry PRIVATE CYW43_DEFAULT_IP_AP_GATEWAY "192.168.4.1")
+pico_configure_ip4_address(sufni-suspension-telemetry PRIVATE CYW43_DEFAULT_IP_MASK "255.255.255.0")
 
 if(NOT IMU_FRAME)
     set(IMU_FRAME "NONE")
