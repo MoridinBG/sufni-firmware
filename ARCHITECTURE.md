@@ -36,41 +36,41 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 
 `src/net/`:
 
-| Module                                          | Responsibility                                                                                                              |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `tcpserver.c` / `tcpserver.h`                   | Core 1-owned TCP server: connection lifecycle, protocol detection, dispatch to protocol handlers                            |
-| `live_protocol.h`                               | Versioned wire format for live preview: frame header, session metadata, batch payloads, stats                               |
-| `live_core1_protocol.c` / `live_core1_protocol.h` | Core 1 live protocol handler: request processing, frame emission, slot draining, teardown, and session stats              |
-| `management_protocol.c` / `management_protocol.h` | Core 1 management protocol handler: file listing, download, trash, mark-uploaded, config upload, time update             |
-| `wifi.c` / `wifi.h`                             | WiFi lifecycle: STA or AP mode start from config, stop                                                                      |
+| Module                                            | Responsibility                                                                                               |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `tcpserver.c` / `tcpserver.h`                     | Core 1-owned TCP server: connection lifecycle, protocol detection, dispatch to protocol handlers             |
+| `live_protocol.h`                                 | Versioned wire format for live preview: frame header, session metadata, batch payloads, stats                |
+| `live_core1_protocol.c` / `live_core1_protocol.h` | Core 1 live protocol handler: request processing, frame emission, slot draining, teardown, and session stats |
+| `management_protocol.c` / `management_protocol.h` | Core 1 management protocol handler: file listing, download, trash, mark-uploaded, config upload, time update |
+| `wifi.c` / `wifi.h`                               | WiFi lifecycle: STA or AP mode start from config, stop                                                       |
 
 Other modules:
 
-| Module                                          | Responsibility                                                                                                              |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `state_views.c` / `state_views.h`               | State-specific rendering for `IDLE` and `GPS_WAIT` screens                                                                  |
-| `sensor_setup.c` / `sensor_setup.h`             | Compile-time-selected global GPS/IMU sensor instances                                                                       |
-| `display.c` / `display.h`                       | Display setup and single-message helper                                                                                     |
-| `helpers.c` / `helpers.h`                       | Shared runtime helpers such as WiFi, USB, battery, and reset helpers                                                        |
-| `sst.c` / `sst.h`                               | SST binary format structs, chunk type definitions, and helpers (source of truth for the format)                             |
-| `config.c` / `config.h`                         | CONFIG file parsing, staging, validation, snapshot application                                                               |
+| Module                              | Responsibility                                                                                  |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `state_views.c` / `state_views.h`   | State-specific rendering for `IDLE` and `GPS_WAIT` screens                                      |
+| `sensor_setup.c` / `sensor_setup.h` | Compile-time-selected global GPS/IMU sensor instances                                           |
+| `display.c` / `display.h`           | Display setup and single-message helper                                                         |
+| `helpers.c` / `helpers.h`           | Shared runtime helpers such as WiFi, USB, battery, and reset helpers                            |
+| `sst.c` / `sst.h`                   | SST binary format structs, chunk type definitions, and helpers (source of truth for the format) |
+| `config.c` / `config.h`             | CONFIG file parsing, staging, validation, snapshot application                                  |
 
 ## State machine
 
 The main loop in `src/fw/main.c` dispatches to a handler function indexed by the current state. Startup work is delegated to `fw_init.c`, acquisition to `data_acquisition.c`, and some state rendering to `state_views.c`.
 
-| State       | Trigger                        | Description                                                                                                                                                 |
-| ----------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IDLE`      | Default after init             | Shows clock, battery, sensor status on display. Polls sensor availability.                                                                                  |
-| `SLEEP`     | Right press in IDLE            | Deep sleep (WFI). Saves power by stopping clocks and display.                                                                                               |
-| `WAKING`    | Button interrupt from SLEEP    | Restores clocks, display, buttons. Transitions to IDLE.                                                                                                     |
-| `REC_START` | Left press in IDLE             | Applies calibration, inits sensors. If GPS available, goes to GPS_WAIT; otherwise starts recording.                                                         |
-| `GPS_WAIT`  | GPS available during REC_START | Waits for reliable GPS fix (10 consecutive good fixes with 3D fix, >=6 sats, EPE<=6m). User can skip (left press) or confirm when ready.                    |
-| `RECORD`    | After REC_START/GPS_WAIT       | Active data acquisition. Repeating timer callbacks sample sensors into buffers while the main loop idles in the `RECORD` slot.                              |
-| `REC_STOP`  | Left press in RECORD           | Stops timers, flushes remaining data, closes file.                                                                                                          |
+| State       | Trigger                        | Description                                                                                                                                                                                                       |
+| ----------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IDLE`      | Default after init             | Shows clock, battery, sensor status on display. Polls sensor availability.                                                                                                                                        |
+| `SLEEP`     | Right press in IDLE            | Deep sleep (WFI). Saves power by stopping clocks and display.                                                                                                                                                     |
+| `WAKING`    | Button interrupt from SLEEP    | Restores clocks, display, buttons. Transitions to IDLE.                                                                                                                                                           |
+| `REC_START` | Left press in IDLE             | Applies calibration, inits sensors. If GPS available, goes to GPS_WAIT; otherwise starts recording.                                                                                                               |
+| `GPS_WAIT`  | GPS available during REC_START | Waits for reliable GPS fix (10 consecutive good fixes with 3D fix, >=6 sats, EPE<=6m). User can skip (left press) or confirm when ready.                                                                          |
+| `RECORD`    | After REC_START/GPS_WAIT       | Active data acquisition. Repeating timer callbacks sample sensors into buffers while the main loop idles in the `RECORD` slot.                                                                                    |
+| `REC_STOP`  | Left press in RECORD           | Stops timers, flushes remaining data, closes file.                                                                                                                                                                |
 | `SYNC_DATA` | Left long-press in IDLE        | Starts WiFi and runs the TCP server with live preview disabled. Clients pull recordings via the management protocol and then explicitly move verified downloads to `uploaded/` via a follow-up management action. |
-| `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves either the management protocol or live preview. |
-| `MSC`       | USB cable detected at boot     | USB Mass Storage mode. SD card exposed directly to host. Mutually exclusive with normal operation.                                                          |
+| `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves either the management protocol or live preview.                                                 |
+| `MSC`       | USB cable detected at boot     | USB Mass Storage mode. SD card exposed directly to host. Mutually exclusive with normal operation.                                                                                                                |
 
 Button mapping:
 
@@ -343,40 +343,40 @@ Each protocol registers a `struct tcpserver_protocol_ops` with function pointers
 
 The management protocol (`management_protocol.c`) provides structured access to the device's files and configuration. All frames use a 16-byte header:
 
-| Offset | Size | Field            | Description                      |
-| ------ | ---- | ---------------- | -------------------------------- |
-| 0      | 4    | `magic`          | `0x544D474D` ("MGMT")            |
-| 4      | 2    | `version`        | Currently `1`                    |
-| 6      | 2    | `frame_type`     | `management_frame_type` enum     |
-| 8      | 4    | `request_id`     | Client-assigned correlation ID   |
-| 12     | 4    | `payload_length` | Payload bytes following header   |
+| Offset | Size | Field            | Description                    |
+| ------ | ---- | ---------------- | ------------------------------ |
+| 0      | 4    | `magic`          | `0x544D474D` ("MGMT")          |
+| 4      | 2    | `version`        | Currently `2`                  |
+| 6      | 2    | `frame_type`     | `management_frame_type` enum   |
+| 8      | 4    | `request_id`     | Client-assigned correlation ID |
+| 12     | 4    | `payload_length` | Payload bytes following header |
 
 Request frame types:
 
-| Frame             | ID | Payload                                        | Description                                         |
-| ----------------- | -- | ---------------------------------------------- | --------------------------------------------------- |
-| `LIST_DIR_REQ`    | 1  | `{uint16_t dir_id, uint16_t reserved}`         | List files in a directory                           |
-| `GET_FILE_REQ`    | 2  | `{uint16_t file_class, uint16_t reserved, int32_t record_id}` | Download a file                       |
-| `TRASH_FILE_REQ`  | 3  | `{int32_t record_id}`                          | Move a recording to `trash/`                        |
-| `PUT_FILE_BEGIN`   | 4  | `{uint16_t file_class, uint16_t reserved, uint64_t file_size}` | Begin uploading a file               |
-| `PUT_FILE_CHUNK`   | 5  | Raw file bytes (up to 512)                     | Upload chunk (no per-chunk acknowledgement)         |
-| `PUT_FILE_COMMIT`  | 6  | (none)                                         | Finalize upload, validate and apply                 |
-| `SET_TIME_REQ`    | 7  | `{uint32_t utc_seconds, uint32_t micros}`      | Set device time                                     |
-| `PING`            | 8  | (none)                                         | Keepalive                                           |
-| `MARK_SST_UPLOADED_REQ` | 9 | `{int32_t record_id}`                       | Move a root SST to `uploaded/` after client-side validation |
+| Frame                   | ID  | Payload                                                        | Description                                                 |
+| ----------------------- | --- | -------------------------------------------------------------- | ----------------------------------------------------------- |
+| `LIST_DIR_REQ`          | 1   | `{uint16_t dir_id, uint16_t reserved}`                         | List files in a directory                                   |
+| `GET_FILE_REQ`          | 2   | `{uint16_t file_class, uint16_t reserved, int32_t record_id}`  | Download a file                                             |
+| `TRASH_FILE_REQ`        | 3   | `{int32_t record_id}`                                          | Move a recording to `trash/`                                |
+| `PUT_FILE_BEGIN`        | 4   | `{uint16_t file_class, uint16_t reserved, uint64_t file_size}` | Begin uploading a file                                      |
+| `PUT_FILE_CHUNK`        | 5   | Raw file bytes (up to 512)                                     | Upload chunk (no per-chunk acknowledgement)                 |
+| `PUT_FILE_COMMIT`       | 6   | (none)                                                         | Finalize upload, validate and apply                         |
+| `SET_TIME_REQ`          | 7   | `{uint32_t utc_seconds, uint32_t micros}`                      | Set device time                                             |
+| `PING`                  | 8   | (none)                                                         | Keepalive                                                   |
+| `MARK_SST_UPLOADED_REQ` | 9   | `{int32_t record_id}`                                          | Move a root SST to `uploaded/` after client-side validation |
 
 Response frame types:
 
-| Frame             | ID | Payload                                        | Description                                         |
-| ----------------- | -- | ---------------------------------------------- | --------------------------------------------------- |
-| `LIST_DIR_ENTRY`  | 16 | Directory entry struct (see below)             | One entry per file                                  |
-| `LIST_DIR_DONE`   | 17 | `{uint32_t entry_count}`                       | End of listing                                      |
-| `FILE_BEGIN`      | 18 | `{uint16_t file_class, uint16_t reserved, int32_t record_id, uint64_t file_size, char name[12]}` | File download starting |
-| `FILE_CHUNK`      | 19 | Raw file bytes (up to 512)                     | Download chunk                                      |
-| `FILE_END`        | 20 | (none)                                         | Download complete                                   |
-| `ACTION_RESULT`   | 21 | `{int32_t result_code}`                        | Success/failure for mutating operations             |
-| `ERROR`           | 22 | `{int32_t error_code}`                         | Protocol-level error                                |
-| `PONG`            | 23 | (none)                                         | Keepalive response                                  |
+| Frame            | ID  | Payload                                                                                          | Description                             |
+| ---------------- | --- | ------------------------------------------------------------------------------------------------ | --------------------------------------- |
+| `LIST_DIR_ENTRY` | 16  | Directory entry struct (see below)                                                               | One entry per file                      |
+| `LIST_DIR_DONE`  | 17  | `{uint32_t entry_count}`                                                                         | End of listing                          |
+| `FILE_BEGIN`     | 18  | `{uint16_t file_class, uint16_t reserved, int32_t record_id, uint64_t file_size, char name[12]}` | File download starting                  |
+| `FILE_CHUNK`     | 19  | Raw file bytes (up to 512)                                                                       | Download chunk                          |
+| `FILE_END`       | 20  | (none)                                                                                           | Download complete                       |
+| `ACTION_RESULT`  | 21  | `{int32_t result_code}`                                                                          | Success/failure for mutating operations |
+| `ERROR`          | 22  | `{int32_t error_code}`                                                                           | Protocol-level error                    |
+| `PONG`           | 23  | (none)                                                                                           | Keepalive response                      |
 
 Directory listing entries include file metadata:
 
@@ -411,50 +411,52 @@ Result codes: `OK` (0), `INVALID_REQUEST` (-1), `NOT_FOUND` (-2), `BUSY` (-3), `
 
 The live preview protocol uses a 16-byte frame header:
 
-| Offset | Size | Field            | Description                      |
-| ------ | ---- | ---------------- | -------------------------------- |
-| 0      | 4    | `magic`          | `0x4556494C` ("LIVE")            |
-| 4      | 2    | `version`        | Currently `1`                    |
-| 6      | 2    | `frame_type`     | `live_frame_type` enum           |
-| 8      | 4    | `payload_length` | Payload bytes following header   |
-| 12     | 4    | `sequence`       | Per-frame sequence counter       |
+| Offset | Size | Field            | Description                    |
+| ------ | ---- | ---------------- | ------------------------------ |
+| 0      | 4    | `magic`          | `0x4556494C` ("LIVE")          |
+| 4      | 2    | `version`        | Currently `1`                  |
+| 6      | 2    | `frame_type`     | `live_frame_type` enum         |
+| 8      | 4    | `payload_length` | Payload bytes following header |
+| 12     | 4    | `sequence`       | Per-frame sequence counter     |
 
 Client request frames:
 
-| Frame          | ID | Payload                                                    |
-| -------------- | -- | ---------------------------------------------------------- |
-| `START_LIVE`   | 1  | `{uint32_t sensor_mask, uint32_t travel_hz, uint32_t imu_hz, uint32_t gps_fix_hz}` |
-| `STOP_LIVE`    | 2  | (none)                                                     |
-| `PING`         | 3  | (none)                                                     |
-| `IDENTIFY`     | 4  | (none)                                                     |
+| Frame        | ID  | Payload                                                                                      |
+| ------------ | --- | -------------------------------------------------------------------------------------------- |
+| `START_LIVE` | 1   | `{uint32_t requested_sensor_mask, uint32_t travel_hz, uint32_t imu_hz, uint32_t gps_fix_hz}` |
+| `STOP_LIVE`  | 2   | (none)                                                                                       |
+| `PING`       | 3   | (none)                                                                                       |
+| `IDENTIFY`   | 4   | (none)                                                                                       |
 
 Server control frames:
 
-| Frame             | ID | Payload                                                    |
-| ----------------- | -- | ---------------------------------------------------------- |
-| `START_LIVE_ACK`  | 16 | `{int32_t result, uint32_t session_id, uint32_t selected_sensor_mask}` |
-| `STOP_LIVE_ACK`   | 17 | `{uint32_t session_id}`                                    |
-| `ERROR`           | 18 | `{int32_t error_code}`                                     |
-| `PONG`            | 19 | (none)                                                     |
-| `SESSION_HEADER`  | 20 | Session metadata (see below)                               |
-| `IDENTIFY_ACK`    | 21 | `{uint8_t board_id[8]}`                                    |
+| Frame            | ID  | Payload                                                                |
+| ---------------- | --- | ---------------------------------------------------------------------- |
+| `START_LIVE_ACK` | 16  | `{int32_t result, uint32_t session_id, uint32_t selected_sensor_mask}` |
+| `STOP_LIVE_ACK`  | 17  | `{uint32_t session_id}`                                                |
+| `ERROR`          | 18  | `{int32_t error_code}`                                                 |
+| `PONG`           | 19  | (none)                                                                 |
+| `SESSION_HEADER` | 20  | Session metadata (see below)                                           |
+| `IDENTIFY_ACK`   | 21  | `{uint8_t board_id[8]}`                                                |
 
 Server data frames:
 
-| Frame            | ID | Payload                                                    |
-| ---------------- | -- | ---------------------------------------------------------- |
-| `TRAVEL_BATCH`   | 32 | Batch header + `travel_record[]`                           |
-| `IMU_BATCH`      | 33 | Batch header + `imu_record[]`                              |
-| `GPS_BATCH`      | 34 | Batch header + `gps_record[]`                              |
-| `SESSION_STATS`  | 48 | Per-stream queue depths and dropped-batch counters         |
+| Frame           | ID  | Payload                                            |
+| --------------- | --- | -------------------------------------------------- |
+| `TRAVEL_BATCH`  | 32  | Batch header + `travel_record[]`                   |
+| `IMU_BATCH`     | 33  | Batch header + `imu_record[]`                      |
+| `GPS_BATCH`     | 34  | Batch header + `gps_record[]`                      |
+| `SESSION_STATS` | 48  | Per-stream queue depths and dropped-batch counters |
 
-`SESSION_HEADER` returns the accepted rates, session timestamps, active IMU mask and scale factors, and session flags. The frame type of batch frames implicitly identifies the stream type. Batch frames carry a 28-byte payload header with stream-local sequence number, first sample index and monotonic timestamp, and sample count. The desktop can reconstruct timing from these fields without relying on packet arrival timestamps.
+`SESSION_HEADER` returns the accepted rates, session timestamps, active IMU mask and scale factors, session flags, and the requested/accepted individual sensor masks. The frame type of batch frames implicitly identifies the stream type. Batch frames carry a 28-byte payload header with stream-local sequence number, first sample index and monotonic timestamp, and sample count. The desktop can reconstruct timing from these fields without relying on packet arrival timestamps.
 
-Sensor mask bits: `TRAVEL` (0x01), `IMU` (0x02), `GPS` (0x04).
+Stream mask bits in `START_LIVE_ACK.selected_sensor_mask`: `TRAVEL` (0x01), `IMU` (0x02), `GPS` (0x04).
+
+Individual sensor mask bits in `START_LIVE.requested_sensor_mask`, `SESSION_HEADER.requested_sensor_mask`, and `SESSION_HEADER.accepted_sensor_mask`: `FORK_TRAVEL` (0x00000001), `SHOCK_TRAVEL` (0x00000002), `FRAME_IMU` (0x00000004), `FORK_IMU` (0x00000008), `REAR_IMU` (0x00000010), `GPS` (0x00000020). Live start is partial: the firmware starts any requested sensors that are available and reports omitted requested sensors through `accepted_sensor_mask`.
 
 Session flags: `CALIBRATED_ONLY` (0x01), `MUTUALLY_EXCLUSIVE_WITH_RECORDING` (0x02).
 
-Start result codes: `OK` (0), `INVALID_REQUEST` (-1), `BUSY` (-2), `UNAVAILABLE` (-3), `INTERNAL_ERROR` (-4).
+Start result codes: `OK` (0), `INVALID_REQUEST` (-1), `BUSY` (-2), `NO_SENSORS_STARTED` (-5).
 
 Live preview teardown is serialized so a disconnected live session cannot leave shared control state behind for the next client.
 
@@ -540,16 +542,16 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 
 The `CONFIG` file is a plain-text `key=value` file (one entry per line, `=` delimiter). Unrecognized keys are ignored; missing keys retain their defaults. Parsed by `config_load_file()` in `src/util/config.c`.
 
-| Key | Default | Max size | Description |
-|---|---|---|---|
-| `WIFI_MODE` | `STA` | enum | WiFi mode: `STA` (join existing network) or `AP` (create access point) |
-| `STA_SSID` | `sst` | 33 bytes | SSID for station mode (also accepted as `SSID` for backwards compatibility) |
-| `STA_PSK` | `changemeplease` | 64 bytes | Password for station mode (also accepted as `PSK`) |
-| `AP_SSID` | `SufniDAQ` | 33 bytes | SSID when in AP mode |
-| `AP_PSK` | `changemeplease` | 64 bytes | Password when in AP mode (minimum 8 characters) |
-| `NTP_SERVER` | `pool.ntp.org` | 264 bytes | NTP server hostname for time sync |
-| `COUNTRY` | `HU` | uint32 | 2-letter country code for WiFi regulatory domain (maps to `CYW43_COUNTRY()`) |
-| `TIMEZONE` | `UTC0` | 100 bytes | POSIX TZ string, or a timezone name looked up from `zones.csv` on the SD card |
+| Key          | Default          | Max size  | Description                                                                   |
+| ------------ | ---------------- | --------- | ----------------------------------------------------------------------------- |
+| `WIFI_MODE`  | `STA`            | enum      | WiFi mode: `STA` (join existing network) or `AP` (create access point)        |
+| `STA_SSID`   | `sst`            | 33 bytes  | SSID for station mode (also accepted as `SSID` for backwards compatibility)   |
+| `STA_PSK`    | `changemeplease` | 64 bytes  | Password for station mode (also accepted as `PSK`)                            |
+| `AP_SSID`    | `SufniDAQ`       | 33 bytes  | SSID when in AP mode                                                          |
+| `AP_PSK`     | `changemeplease` | 64 bytes  | Password when in AP mode (minimum 8 characters)                               |
+| `NTP_SERVER` | `pool.ntp.org`   | 264 bytes | NTP server hostname for time sync                                             |
+| `COUNTRY`    | `HU`             | uint32    | 2-letter country code for WiFi regulatory domain (maps to `CYW43_COUNTRY()`)  |
+| `TIMEZONE`   | `UTC0`           | 100 bytes | POSIX TZ string, or a timezone name looked up from `zones.csv` on the SD card |
 
 Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. If parsing or validation fails, the file is rejected and defaults are used.
 

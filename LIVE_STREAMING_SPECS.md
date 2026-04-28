@@ -30,7 +30,7 @@ Current protocol constraints:
 ### Magic & Version
 
 - Magic: `0x4556494C` (ASCII `"LIVE"`, little-endian) — uint32
-- Protocol version: `1` — uint16
+- Protocol version: `2` — uint16
 
 ### Frame Types
 
@@ -63,13 +63,29 @@ Current protocol constraints:
 | IMU    | 2     |
 | GPS    | 3     |
 
-### Sensor Mask (bitfield)
+### Stream Mask (bitfield)
+
+Used in `START_LIVE_ACK.selected_sensor_mask` as a stream-group summary.
 
 | Sensor | Bit  |
 | ------ | ---- |
 | TRAVEL | 0x01 |
 | IMU    | 0x02 |
 | GPS    | 0x04 |
+
+### Sensor Instance Mask (bitfield)
+
+Used in `START_LIVE.requested_sensor_mask`, `SESSION_HEADER.requested_sensor_mask`, and
+`SESSION_HEADER.accepted_sensor_mask`.
+
+| Sensor       | Bit        |
+| ------------ | ---------- |
+| Fork travel  | 0x00000001 |
+| Shock travel | 0x00000002 |
+| Frame IMU    | 0x00000004 |
+| Fork IMU     | 0x00000008 |
+| Rear IMU     | 0x00000010 |
+| GPS          | 0x00000020 |
 
 ### Session Flags (bitfield)
 
@@ -82,13 +98,12 @@ Current protocol constraints:
 
 `enum live_start_result`:
 
-| Name            | Value |
-| --------------- | ----- |
-| OK              | 0     |
-| INVALID_REQUEST | -1    |
-| BUSY            | -2    |
-| UNAVAILABLE     | -3    |
-| INTERNAL_ERROR  | -4    |
+| Name               | Value |
+| ------------------ | ----- |
+| OK                 | 0     |
+| INVALID_REQUEST    | -1    |
+| BUSY               | -2    |
+| NO_SENSORS_STARTED | -5    |
 
 ## Protocol Discrimination
 
@@ -120,14 +135,14 @@ TCP read boundaries are not meaningful. The receiver must accumulate bytes until
 | 12     | 4    | uint32 | sequence       |
 
 - `magic`: always `0x4556494C`.
-- `version`: protocol version, currently `1`.
+- `version`: protocol version, currently `2`.
 - `frame_type`: see Frame Types table.
 - `payload_length`: byte count of the payload following this header. May be 0 (e.g. STOP_LIVE request, PONG).
 - `sequence`: connection-local transmit sequence on server-to-client frames. Client-to-server values are currently ignored.
 
 Malformed frame handling:
 
-- If `magic != 0x4556494C`, `version != 1`, or `payload_length > 512` on a client-to-server frame, the current implementation closes the connection without sending a protocol error frame.
+- If `magic != 0x4556494C`, `version != 2`, or `payload_length > 512` on a client-to-server frame, the current implementation closes the connection without sending a protocol error frame.
 - If the frame header is valid but the payload size is wrong for a known frame type, the server sends `ERROR(INVALID_REQUEST)` and keeps the connection open.
 
 ## Session Negotiation
@@ -136,15 +151,15 @@ Malformed frame handling:
 
 Frame type `1`. Payload is `struct live_start_request_frame` (16 bytes):
 
-| Offset | Size | Type   | Field       |
-| ------ | ---- | ------ | ----------- |
-| 0      | 4    | uint32 | sensor_mask |
-| 4      | 4    | uint32 | travel_hz   |
-| 8      | 4    | uint32 | imu_hz      |
-| 12     | 4    | uint32 | gps_fix_hz  |
+| Offset | Size | Type   | Field                 |
+| ------ | ---- | ------ | --------------------- |
+| 0      | 4    | uint32 | requested_sensor_mask |
+| 4      | 4    | uint32 | travel_hz             |
+| 8      | 4    | uint32 | imu_hz                |
+| 12     | 4    | uint32 | gps_fix_hz            |
 
-- `sensor_mask`: bitfield selecting requested streams (see Sensor Mask table).
-- `travel_hz`, `imu_hz`, `gps_fix_hz`: requested sample rates. `0` means use firmware default.
+- `requested_sensor_mask`: bitfield selecting requested individual sensors (see Sensor Instance Mask table).
+- `travel_hz`, `imu_hz`, `gps_fix_hz`: requested sample rates for the stream groups. `0` means use firmware default when at least one sensor in that stream group is requested.
 - Current implementation limits requested rates to these maxima before quantization:
   - travel: `1000` Hz
   - IMU: `1000` Hz
@@ -152,16 +167,16 @@ Frame type `1`. Payload is `struct live_start_request_frame` (16 bytes):
 
 `START_LIVE` response behavior:
 
-- If no session is active and the server accepts the request for startup, the response path is `START_LIVE_ACK` followed, on success only, by `SESSION_HEADER` and an initial `SESSION_STATS`.
+- If no session is active and the server accepts at least one requested sensor for startup, the response path is `START_LIVE_ACK` followed by `SESSION_HEADER` and an initial `SESSION_STATS`.
+- Startup is partial: unavailable requested sensors are omitted from `SESSION_HEADER.accepted_sensor_mask` while accepted sensors still start.
 - If a live session is already active or a start/stop transition is already in progress, the current implementation responds with `ERROR(BUSY)` instead of `START_LIVE_ACK`.
 - If the payload size is wrong, the server responds with `ERROR(INVALID_REQUEST)`.
 
 `START_LIVE_ACK.result` meanings in the current implementation:
 
-- `OK`: session started successfully.
-- `INVALID_REQUEST`: `sensor_mask` was zero.
-- `UNAVAILABLE`: the requested stream had no available sensors.
-- `INTERNAL_ERROR`: calibration refresh failed, GPS setup failed, or a timer could not be started.
+- `OK`: session started with at least one requested sensor.
+- `INVALID_REQUEST`: `requested_sensor_mask` was zero, contained unsupported bits, or the protocol version was wrong.
+- `NO_SENSORS_STARTED`: the request was valid, but none of the requested sensor instances could start.
 
 ### STOP_LIVE Request
 
@@ -214,7 +229,7 @@ Frame type `16`. Payload is `struct live_start_ack_frame` (12 bytes):
 
 - `result`: see Error Codes table. `0` = success; negative = failure.
 - `session_id`: unique session identifier (only meaningful when `result == 0`).
-- `selected_sensor_mask`: bitfield of sensors actually enabled.
+- `selected_sensor_mask`: stream-group summary derived from accepted individual sensors.
 
 On success (`result == 0`), the server immediately sends SESSION_HEADER and SESSION_STATS frames following the ACK.
 
@@ -224,7 +239,7 @@ If the TCP connection drops or the session is stopped, all live-session state is
 
 ### SESSION_HEADER
 
-Frame type `20`. Sent once immediately after a successful START_LIVE_ACK. Payload is `struct live_session_header_frame` (64 bytes):
+Frame type `20`. Sent once immediately after a successful START_LIVE_ACK. Payload is `struct live_session_header_frame` (72 bytes):
 
 | Offset | Size | Type     | Field                      |
 | ------ | ---- | -------- | -------------------------- |
@@ -238,12 +253,16 @@ Frame type `20`. Sent once immediately after a successful START_LIVE_ACK. Payloa
 | 36     | 12   | float[3] | imu_accel_lsb_per_g        |
 | 48     | 12   | float[3] | imu_gyro_lsb_per_dps       |
 | 60     | 4    | uint32   | flags                      |
+| 64     | 4    | uint32   | requested_sensor_mask      |
+| 68     | 4    | uint32   | accepted_sensor_mask       |
 
 Notes:
 
 - The `accepted_*_hz` values are already consistent with the firmware's internal timer periods. The client derives the exact period as `1000000 / accepted_travel_hz` (microseconds) or `1000 / accepted_gps_fix_hz` (milliseconds).
 - `active_imu_mask`: bitfield — bit 0 = frame, bit 1 = fork, bit 2 = rear. IMU count = `popcount(active_imu_mask)`.
-- `selected_sensor_mask` is in START_LIVE_ACK and not repeated here.
+- `selected_sensor_mask` is in START_LIVE_ACK as a stream-group summary.
+- `requested_sensor_mask` is copied from the start request.
+- `accepted_sensor_mask` lists the individual sensors that actually started. A client can compute missing requested sensors as `requested_sensor_mask & ~accepted_sensor_mask`.
 - `imu_accel_lsb_per_g[3]` and `imu_gyro_lsb_per_dps[3]`: per-IMU calibration scales indexed by location (0=frame, 1=fork, 2=rear). Zero for absent IMUs.
 - `flags`: see Session Flags table. The current implementation always sets both defined flags.
 
