@@ -245,6 +245,31 @@ static void on_disabled_gps() { tight_loop_contents(); }
 // RECORD work runs from acquisition timers after recording_start, so the main loop only idles here.
 static void on_rec() { tight_loop_contents(); }
 
+static const char *tcp_session_status_subtitle(enum state session_state, enum network_client_status client_status) {
+    if (session_state != SERVE_TCP) {
+        return NULL;
+    }
+
+    switch (client_status) {
+        case NETWORK_CLIENT_CONNECTED:
+            return "connected";
+        case NETWORK_CLIENT_LIVE:
+            return "live";
+        case NETWORK_CLIENT_MANAGEMENT:
+            return "mgmt";
+        default:
+            return NULL;
+    }
+}
+
+static void display_tcp_session_status(const char *ready_message, const char *subtitle) {
+    if (subtitle != NULL) {
+        display_message_with_subtitle(&disp, ready_message, subtitle);
+    } else {
+        display_message(&disp, ready_message);
+    }
+}
+
 static void run_tcp_session(enum state session_state, const char *ready_message, bool allow_live_preview) {
     struct core1_network_session_config session_request = {
         .session_kind = session_state == SERVE_TCP ? CORE1_NETWORK_SESSION_SERVE_TCP : CORE1_NETWORK_SESSION_SYNC_DATA,
@@ -256,6 +281,7 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
     uint32_t request_generation = 0;
     bool session_running = false;
     bool startup_failed = false;
+    enum network_client_status displayed_client_status = NETWORK_CLIENT_NONE;
 
     tcp_session_stop_requested = false;
     session_request.config_snapshot = config;
@@ -275,8 +301,18 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
         if (core1_read_network_session_status(&session_status) &&
             session_status.request_generation == request_generation) {
             if (!session_running && session_status.phase == NETWORK_SESSION_PHASE_RUNNING) {
-                display_message(&disp, ready_message);
+                displayed_client_status = session_status.client_status;
+                display_tcp_session_status(ready_message,
+                                           tcp_session_status_subtitle(session_state, displayed_client_status));
                 session_running = true;
+            }
+
+            if (session_running && session_status.phase == NETWORK_SESSION_PHASE_RUNNING) {
+                if (session_status.client_status != displayed_client_status) {
+                    displayed_client_status = session_status.client_status;
+                    display_tcp_session_status(ready_message,
+                                               tcp_session_status_subtitle(session_state, displayed_client_status));
+                }
             }
 
             if (session_status.phase == NETWORK_SESSION_PHASE_COMPLETED ||

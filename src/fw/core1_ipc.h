@@ -6,6 +6,7 @@
 
 #include "hardware/sync.h"
 
+#include "../net/network_client_status.h"
 #include "../util/config.h"
 
 #define CORE1_FIFO_FAMILY_MASK           0xFF000000u
@@ -99,6 +100,7 @@ struct core1_network_session_status {
     uint32_t session_id;
     enum network_session_phase phase;
     enum network_session_error error_code;
+    enum network_client_status client_status;
 };
 
 struct core1_network_session_request_mailbox {

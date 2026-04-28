@@ -27,6 +27,7 @@ static volatile struct core1_network_session_status_mailbox core1_network_sessio
             .session_id = 0,
             .phase = NETWORK_SESSION_PHASE_IDLE,
             .error_code = NETWORK_SESSION_ERR_NONE,
+            .client_status = NETWORK_CLIENT_NONE,
         },
 };
 static uint32_t core1_next_network_request_generation = 1u;
@@ -110,20 +111,43 @@ static bool core1_snapshot_network_session_stop_request(struct core1_network_ses
     return true;
 }
 
-static void core1_publish_network_session_status(uint32_t request_generation, uint32_t session_id,
-                                                 enum network_session_phase phase,
-                                                 enum network_session_error error_code) {
+static void core1_publish_network_session_status_with_client(uint32_t request_generation, uint32_t session_id,
+                                                             enum network_session_phase phase,
+                                                             enum network_session_error error_code,
+                                                             enum network_client_status client_status) {
     struct core1_network_session_status status = {
         .status_generation = core1_next_network_status_generation++,
         .request_generation = request_generation,
         .session_id = session_id,
         .phase = phase,
         .error_code = error_code,
+        .client_status = client_status,
     };
     uint32_t write_generation = core1_mailbox_begin_write(&core1_network_session_status_mailbox.publish_generation);
 
     core1_network_session_status_mailbox.status = status;
     core1_mailbox_end_write(&core1_network_session_status_mailbox.publish_generation, write_generation);
+}
+
+static void core1_publish_network_session_status(uint32_t request_generation, uint32_t session_id,
+                                                 enum network_session_phase phase,
+                                                 enum network_session_error error_code) {
+    core1_publish_network_session_status_with_client(request_generation, session_id, phase, error_code,
+                                                     NETWORK_CLIENT_NONE);
+}
+
+static void core1_tcp_client_status_changed(const struct tcpserver *server, enum network_client_status client_status,
+                                            void *context) {
+    struct core1_network_session_stop_context *stop_context = context;
+
+    (void)server;
+    if (stop_context == NULL || stop_context->stop_requested) {
+        return;
+    }
+
+    core1_publish_network_session_status_with_client(stop_context->request_generation, stop_context->session_id,
+                                                     NETWORK_SESSION_PHASE_RUNNING, NETWORK_SESSION_ERR_NONE,
+                                                     client_status);
 }
 
 static bool core1_network_session_should_stop(void *context) {
@@ -241,6 +265,8 @@ static void core1_run_tcp_backend(void) {
         .last_handled_request_generation = request.request_generation,
         .stop_requested = false,
     };
+    options.on_client_status_changed = core1_tcp_client_status_changed;
+    options.client_status_context = &stop_context;
 
     core1_publish_network_session_status(request.request_generation, session_id, NETWORK_SESSION_PHASE_REQUESTED,
                                          NETWORK_SESSION_ERR_NONE);

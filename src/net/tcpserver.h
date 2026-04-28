@@ -7,11 +7,14 @@
 
 #include "live_core1_protocol.h"
 #include "management_protocol.h"
+#include "network_client_status.h"
 
 #include "lwip/tcp.h"
 #include "pico/cyw43_arch.h"
 
 #define TCPSERVER_RX_BUFFER_SIZE MANAGEMENT_PROTOCOL_MAX_RX_FRAME_SIZE
+
+struct tcpserver;
 
 enum tcpserver_protocol_mode {
     TCPSERVER_PROTOCOL_UNKNOWN = 0,
@@ -32,6 +35,9 @@ struct tcpserver_protocol_ops {
 struct tcpserver_options {
     bool allow_live_preview;
     bool enable_mdns;
+    void (*on_client_status_changed)(const struct tcpserver *server, enum network_client_status client_status,
+                                     void *context);
+    void *client_status_context;
 };
 
 struct tcpserver {

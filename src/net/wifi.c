@@ -9,6 +9,8 @@
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 
+#define WIFI_MAC_ADDRESS_LEN 6
+
 static bool wifi_running = false;
 static enum wifi_mode wifi_active_mode = WIFI_MODE_STA;
 static struct netif *active_netif = NULL;
@@ -120,3 +122,18 @@ void wifi_stop(void) {
 }
 
 struct netif *wifi_active_netif(void) { return active_netif; }
+
+bool wifi_client_connected(void) {
+    if (!wifi_running) {
+        return false;
+    }
+
+    if (wifi_active_mode == WIFI_MODE_STA) {
+        return true;
+    }
+
+    int num_stas = 1;
+    uint8_t macs[WIFI_MAC_ADDRESS_LEN];
+    cyw43_wifi_ap_get_stas(&cyw43_state, &num_stas, macs);
+    return num_stas > 0;
+}

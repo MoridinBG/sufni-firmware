@@ -206,6 +206,37 @@ static bool tcpserver_consume_ack_wakeup(struct tcpserver *server) {
     }
 }
 
+static enum network_client_status tcpserver_current_client_status(const struct tcpserver *server,
+                                                                  bool wifi_client_connected) {
+    if (!server->client_connected) {
+        return wifi_client_connected ? NETWORK_CLIENT_CONNECTED : NETWORK_CLIENT_NONE;
+    }
+
+    switch (server->protocol_mode) {
+        case TCPSERVER_PROTOCOL_LIVE:
+            return NETWORK_CLIENT_LIVE;
+        case TCPSERVER_PROTOCOL_MANAGEMENT:
+            return NETWORK_CLIENT_MANAGEMENT;
+        default:
+            return NETWORK_CLIENT_CONNECTED;
+    }
+}
+
+static void tcpserver_report_client_status_change(struct tcpserver *server,
+                                                  enum network_client_status *reported_client_status,
+                                                  bool wifi_client_connected) {
+    enum network_client_status client_status = tcpserver_current_client_status(server, wifi_client_connected);
+
+    if (client_status == *reported_client_status) {
+        return;
+    }
+
+    *reported_client_status = client_status;
+    if (server->options.on_client_status_changed != NULL) {
+        server->options.on_client_status_changed(server, client_status, server->options.client_status_context);
+    }
+}
+
 static err_t tcp_server_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
     struct tcpserver *server = (struct tcpserver *)arg;
 
@@ -437,16 +468,26 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
 }
 
 bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_requested, void *stop_context) {
+    bool wifi_station_connected = wifi_client_connected();
+    absolute_time_t wifi_status_timeout = make_timeout_time_ms(250);
+    enum network_client_status reported_client_status = NETWORK_CLIENT_NONE;
+
     LOG("TCP", "Server started, waiting for requests\n");
 
     while (!server->finish_requested) {
         bool skip_sleep = false;
+
+        if (absolute_time_diff_us(get_absolute_time(), wifi_status_timeout) < 0) {
+            wifi_status_timeout = make_timeout_time_ms(250);
+            wifi_station_connected = wifi_client_connected();
+        }
 
         if (stop_requested != NULL && stop_requested(stop_context)) {
             tcpserver_finish(server);
         }
 
         tcpserver_complete_error_disconnect(server);
+        tcpserver_report_client_status_change(server, &reported_client_status, wifi_station_connected);
 
         if (server->client_connected) {
             bool made_progress = false;
@@ -465,6 +506,8 @@ bool tcpserver_run(struct tcpserver *server, tcpserver_stop_requested_fn stop_re
                 skip_sleep = true;
             }
         }
+
+        tcpserver_report_client_status_change(server, &reported_client_status, wifi_station_connected);
 
         skip_sleep = skip_sleep || tcpserver_consume_ack_wakeup(server);
         if (!skip_sleep) {
