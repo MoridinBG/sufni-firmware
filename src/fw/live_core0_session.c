@@ -36,6 +36,7 @@ struct live_runtime_state {
     uint32_t imu_period_us;
     uint32_t imu_max_ticks_per_slot;
     uint32_t gps_fix_interval_ms;
+    uint32_t accepted_sensor_mask;
     uint32_t active_imu_count;
     uint32_t active_imu_mask;
     int current_travel_slot;
@@ -200,8 +201,14 @@ static bool live_travel_cb(repeating_timer_t *timer) {
         slot = &live_stream_shared.travel_slots[live_runtime.current_travel_slot];
     }
 
-    slot->payload[slot->header.sample_count].fork_angle = fork_sensor.measure(&fork_sensor);
-    slot->payload[slot->header.sample_count].shock_angle = shock_sensor.measure(&shock_sensor);
+    slot->payload[slot->header.sample_count].fork_angle =
+        (live_runtime.accepted_sensor_mask & LIVE_SENSOR_INSTANCE_MASK_FORK_TRAVEL) != 0u
+            ? fork_sensor.measure(&fork_sensor)
+            : 0u;
+    slot->payload[slot->header.sample_count].shock_angle =
+        (live_runtime.accepted_sensor_mask & LIVE_SENSOR_INSTANCE_MASK_SHOCK_TRAVEL) != 0u
+            ? shock_sensor.measure(&shock_sensor)
+            : 0u;
     slot->header.sample_count++;
     slot->header.payload_bytes = slot->header.sample_count * sizeof(struct travel_record);
     live_stream_shared.travel_stats.next_index++;
@@ -244,15 +251,15 @@ static bool live_imu_cb(repeating_timer_t *timer) {
     }
 
     record_index = slot->header.payload_bytes / sizeof(struct imu_record);
-    if (imu_frame.available) {
+    if ((live_runtime.active_imu_mask & 0x01u) != 0u) {
         imu_sensor_read(&imu_frame, &ax, &ay, &az, &gx, &gy, &gz);
         slot->payload[record_index++] = (struct imu_record){.ax = ax, .ay = ay, .az = az, .gx = gx, .gy = gy, .gz = gz};
     }
-    if (imu_fork.available) {
+    if ((live_runtime.active_imu_mask & 0x02u) != 0u) {
         imu_sensor_read(&imu_fork, &ax, &ay, &az, &gx, &gy, &gz);
         slot->payload[record_index++] = (struct imu_record){.ax = ax, .ay = ay, .az = az, .gx = gx, .gy = gy, .gz = gz};
     }
-    if (imu_rear.available) {
+    if ((live_runtime.active_imu_mask & 0x04u) != 0u) {
         imu_sensor_read(&imu_rear, &ax, &ay, &az, &gx, &gy, &gz);
         slot->payload[record_index++] = (struct imu_record){.ax = ax, .ay = ay, .az = az, .gx = gx, .gy = gy, .gz = gz};
     }
@@ -292,8 +299,25 @@ static uint32_t live_requested_rate_or_default(uint32_t requested_rate, uint32_t
     return resolved_rate;
 }
 
+static uint32_t live_selected_stream_mask_from_instances(uint32_t sensor_mask) {
+    uint32_t stream_mask = 0u;
+
+    if ((sensor_mask & LIVE_SENSOR_INSTANCE_MASK_TRAVEL) != 0u) {
+        stream_mask |= LIVE_SENSOR_MASK_TRAVEL;
+    }
+    if ((sensor_mask & LIVE_SENSOR_INSTANCE_MASK_IMU) != 0u) {
+        stream_mask |= LIVE_SENSOR_MASK_IMU;
+    }
+    if ((sensor_mask & LIVE_SENSOR_INSTANCE_MASK_GPS) != 0u) {
+        stream_mask |= LIVE_SENSOR_MASK_GPS;
+    }
+
+    return stream_mask;
+}
+
 bool live_stream_core0_start(const struct live_start_request *req, struct live_start_response *resp) {
     uint32_t requested_mask;
+    bool calibration_ready = true;
 
     live_watchdog_diag_mark_core0(LIVE_WATCHDOG_CORE0_MARKER_SESSION_START);
 
@@ -305,21 +329,22 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         return false;
     }
 
-    requested_mask = req->sensor_mask;
-    if (requested_mask == 0 || req->protocol_version != LIVE_PROTOCOL_VERSION) {
-        LOG("LIVE", "Start rejected: invalid request (mask=0x%02x, ver=%u)\n", requested_mask,
+    requested_mask = req->requested_sensor_mask;
+    if (requested_mask == 0u || (requested_mask & ~LIVE_SENSOR_INSTANCE_MASK_ALL) != 0u ||
+        req->protocol_version != LIVE_PROTOCOL_VERSION) {
+        LOG("LIVE", "Start rejected: invalid request (mask=0x%08x, ver=%u)\n", (unsigned)requested_mask,
             (unsigned)req->protocol_version);
         resp->result = LIVE_START_RESULT_INVALID_REQUEST;
         return false;
     }
 
-    if ((requested_mask & (LIVE_SENSOR_MASK_TRAVEL | LIVE_SENSOR_MASK_IMU)) != 0u &&
+    if ((requested_mask & (LIVE_SENSOR_INSTANCE_MASK_TRAVEL | LIVE_SENSOR_INSTANCE_MASK_IMU)) != 0u &&
         !calibration_refresh_active_sensors()) {
-        LOG("LIVE", "Start failed: calibration refresh failed\n");
-        resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
-        return false;
+        LOG("LIVE", "Start continuing without calibrated travel/IMU: calibration refresh failed\n");
+        calibration_ready = false;
     }
 
+    resp->requested_sensor_mask = requested_mask;
     resp->publish_cadence_ms = LIVE_PUBLISH_CADENCE_MS;
     resp->session_id = live_stream_shared_next_session_id();
     resp->session_start_monotonic_us = time_us_64();
@@ -332,97 +357,119 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
     live_runtime.current_imu_slot = -1;
     live_runtime.current_gps_slot = -1;
 
-    if ((requested_mask & LIVE_SENSOR_MASK_TRAVEL) != 0u) {
-        if (!fork_sensor.available && !shock_sensor.available) {
-            LOG("LIVE", "Start failed: no travel sensors available\n");
-            resp->result = LIVE_START_RESULT_UNAVAILABLE;
-            return false;
+    if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_TRAVEL) != 0u) {
+        if (!calibration_ready) {
+            LOG("LIVE", "Start skipped: travel sensors unavailable without calibration refresh\n");
+        } else {
+            if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_FORK_TRAVEL) != 0u && fork_sensor.available) {
+                resp->accepted_sensor_mask |= LIVE_SENSOR_INSTANCE_MASK_FORK_TRAVEL;
+            }
+            if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_SHOCK_TRAVEL) != 0u && shock_sensor.available) {
+                resp->accepted_sensor_mask |= LIVE_SENSOR_INSTANCE_MASK_SHOCK_TRAVEL;
+            }
         }
 
-        resp->accepted_travel_hz =
-            live_requested_rate_or_default(req->requested_travel_hz, TRAVEL_SAMPLE_RATE, LIVE_MAX_TRAVEL_HZ);
-        resp->travel_period_us = 1000000u / resp->accepted_travel_hz;
-        resp->accepted_travel_hz = 1000000u / resp->travel_period_us;
-        resp->selected_sensor_mask |= LIVE_SENSOR_MASK_TRAVEL;
-        live_runtime.travel_period_us = resp->travel_period_us;
+        if ((resp->accepted_sensor_mask & LIVE_SENSOR_INSTANCE_MASK_TRAVEL) == 0u) {
+            LOG("LIVE", "Start failed: no travel sensors available\n");
+        } else {
+            resp->accepted_travel_hz =
+                live_requested_rate_or_default(req->requested_travel_hz, TRAVEL_SAMPLE_RATE, LIVE_MAX_TRAVEL_HZ);
+            resp->travel_period_us = 1000000u / resp->accepted_travel_hz;
+            resp->accepted_travel_hz = 1000000u / resp->travel_period_us;
+            live_runtime.travel_period_us = resp->travel_period_us;
+        }
     }
 
 #if HAS_IMU
-    if ((requested_mask & LIVE_SENSOR_MASK_IMU) != 0u) {
-        if (imu_frame.available) {
-            resp->active_imu_count++;
-            resp->active_imu_mask |= 0x01u;
-        }
-        if (imu_fork.available) {
-            resp->active_imu_count++;
-            resp->active_imu_mask |= 0x02u;
-        }
-        if (imu_rear.available) {
-            resp->active_imu_count++;
-            resp->active_imu_mask |= 0x04u;
+    if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_IMU) != 0u) {
+        if (!calibration_ready) {
+            LOG("LIVE", "Start skipped: IMU sensors unavailable without calibration refresh\n");
+        } else {
+            if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_FRAME_IMU) != 0u && imu_frame.available) {
+                resp->accepted_sensor_mask |= LIVE_SENSOR_INSTANCE_MASK_FRAME_IMU;
+                resp->active_imu_count++;
+                resp->active_imu_mask |= 0x01u;
+            }
+            if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_FORK_IMU) != 0u && imu_fork.available) {
+                resp->accepted_sensor_mask |= LIVE_SENSOR_INSTANCE_MASK_FORK_IMU;
+                resp->active_imu_count++;
+                resp->active_imu_mask |= 0x02u;
+            }
+            if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_REAR_IMU) != 0u && imu_rear.available) {
+                resp->accepted_sensor_mask |= LIVE_SENSOR_INSTANCE_MASK_REAR_IMU;
+                resp->active_imu_count++;
+                resp->active_imu_mask |= 0x04u;
+            }
         }
 
         if (resp->active_imu_count == 0u) {
             LOG("LIVE", "Start failed: no IMU sensors available\n");
-            resp->result = LIVE_START_RESULT_UNAVAILABLE;
-            return false;
+        } else {
+            resp->accepted_imu_hz =
+                live_requested_rate_or_default(req->requested_imu_hz, IMU_SAMPLE_RATE, LIVE_MAX_IMU_HZ);
+            resp->imu_period_us = 1000000u / resp->accepted_imu_hz;
+            resp->accepted_imu_hz = 1000000u / resp->imu_period_us;
+            live_runtime.imu_period_us = resp->imu_period_us;
+            live_runtime.active_imu_count = resp->active_imu_count;
+            live_runtime.active_imu_mask = resp->active_imu_mask;
+            live_runtime.imu_max_ticks_per_slot = live_imu_max_ticks_per_slot(resp->active_imu_count);
         }
-
-        resp->accepted_imu_hz = live_requested_rate_or_default(req->requested_imu_hz, IMU_SAMPLE_RATE, LIVE_MAX_IMU_HZ);
-        resp->imu_period_us = 1000000u / resp->accepted_imu_hz;
-        resp->accepted_imu_hz = 1000000u / resp->imu_period_us;
-        resp->selected_sensor_mask |= LIVE_SENSOR_MASK_IMU;
-        live_runtime.imu_period_us = resp->imu_period_us;
-        live_runtime.active_imu_count = resp->active_imu_count;
-        live_runtime.active_imu_mask = resp->active_imu_mask;
-        live_runtime.imu_max_ticks_per_slot = live_imu_max_ticks_per_slot(resp->active_imu_count);
+    }
+#else
+    if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_IMU) != 0u) {
+        LOG("LIVE", "Start failed: no IMU sensors available\n");
     }
 #endif
 
 #if HAS_GPS
-    if ((requested_mask & LIVE_SENSOR_MASK_GPS) != 0u) {
+    if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_GPS) != 0u) {
         if (!gps.available) {
             LOG("LIVE", "Start failed: GPS not available\n");
-            resp->result = LIVE_START_RESULT_UNAVAILABLE;
-            return false;
-        }
+        } else {
+            resp->accepted_gps_fix_hz =
+                live_requested_rate_or_default(req->requested_gps_fix_hz, 1, LIVE_MAX_GPS_FIX_HZ);
+            resp->gps_fix_interval_ms = 1000u / resp->accepted_gps_fix_hz;
+            if (resp->gps_fix_interval_ms == 0u) {
+                resp->gps_fix_interval_ms = 1u;
+            }
+            resp->accepted_gps_fix_hz = 1000u / resp->gps_fix_interval_ms;
 
-        resp->accepted_gps_fix_hz = live_requested_rate_or_default(req->requested_gps_fix_hz, 1, LIVE_MAX_GPS_FIX_HZ);
-        resp->gps_fix_interval_ms = 1000u / resp->accepted_gps_fix_hz;
-        if (resp->gps_fix_interval_ms == 0u) {
-            resp->gps_fix_interval_ms = 1u;
+            if (!gps.power_on(&gps)) {
+                LOG("LIVE", "Start failed: GPS power_on failed\n");
+                resp->accepted_gps_fix_hz = 0u;
+                resp->gps_fix_interval_ms = 0u;
+            } else if (!gps_sensor_configure(&gps, (uint16_t)resp->gps_fix_interval_ms, true, true, true, true,
+                                             false)) {
+                LOG("LIVE", "Start failed: GPS configure failed (interval=%u ms)\n",
+                    (unsigned)resp->gps_fix_interval_ms);
+                gps.power_off(&gps);
+                resp->accepted_gps_fix_hz = 0u;
+                resp->gps_fix_interval_ms = 0u;
+            } else if (!add_repeating_timer_us(LIVE_GPS_RX_DRAIN_INTERVAL_US, live_gps_timer_cb, NULL,
+                                               &live_runtime.gps_timer)) {
+                LOG("LIVE", "Start failed: GPS RX drain timer failed\n");
+                gps.power_off(&gps);
+                resp->accepted_gps_fix_hz = 0u;
+                resp->gps_fix_interval_ms = 0u;
+            } else {
+                resp->accepted_sensor_mask |= LIVE_SENSOR_INSTANCE_MASK_GPS;
+                live_runtime.gps_enabled = true;
+                live_runtime.gps_fix_interval_ms = resp->gps_fix_interval_ms;
+            }
         }
-        resp->accepted_gps_fix_hz = 1000u / resp->gps_fix_interval_ms;
-
-        if (!gps.power_on(&gps)) {
-            LOG("LIVE", "Start failed: GPS power_on failed\n");
-            resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
-            return false;
-        }
-
-        if (!gps_sensor_configure(&gps, (uint16_t)resp->gps_fix_interval_ms, true, true, true, true, false)) {
-            LOG("LIVE", "Start failed: GPS configure failed (interval=%u ms)\n", (unsigned)resp->gps_fix_interval_ms);
-            gps.power_off(&gps);
-            resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
-            return false;
-        }
-
-        if (!add_repeating_timer_us(LIVE_GPS_RX_DRAIN_INTERVAL_US, live_gps_timer_cb, NULL, &live_runtime.gps_timer)) {
-            LOG("LIVE", "Start failed: GPS RX drain timer failed\n");
-            gps.power_off(&gps);
-            resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
-            return false;
-        }
-
-        resp->selected_sensor_mask |= LIVE_SENSOR_MASK_GPS;
-        live_runtime.gps_enabled = true;
-        live_runtime.gps_fix_interval_ms = resp->gps_fix_interval_ms;
+    }
+#else
+    if ((requested_mask & LIVE_SENSOR_INSTANCE_MASK_GPS) != 0u) {
+        LOG("LIVE", "Start failed: GPS not available\n");
     }
 #endif
 
-    if (resp->selected_sensor_mask == 0u) {
-        LOG("LIVE", "Start failed: no sensors selected\n");
-        resp->result = LIVE_START_RESULT_INVALID_REQUEST;
+    resp->selected_sensor_mask = live_selected_stream_mask_from_instances(resp->accepted_sensor_mask);
+
+    if (resp->accepted_sensor_mask == 0u) {
+        LOG("LIVE", "Start failed: none of the requested sensors could start (mask=0x%08x)\n",
+            (unsigned)requested_mask);
+        resp->result = LIVE_START_RESULT_NO_SENSORS_STARTED;
         return false;
     }
 
@@ -430,9 +477,11 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         !add_repeating_timer_us(-(int64_t)live_runtime.travel_period_us, live_travel_cb, NULL,
                                 &live_runtime.travel_timer)) {
         LOG("LIVE", "Start failed: travel timer failed (period=%u us)\n", (unsigned)live_runtime.travel_period_us);
-        live_stream_core0_stop();
-        resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
-        return false;
+        resp->accepted_sensor_mask &= ~LIVE_SENSOR_INSTANCE_MASK_TRAVEL;
+        resp->accepted_travel_hz = 0u;
+        resp->travel_period_us = 0u;
+        live_runtime.travel_period_us = 0u;
+        resp->selected_sensor_mask = live_selected_stream_mask_from_instances(resp->accepted_sensor_mask);
     }
     if ((resp->selected_sensor_mask & LIVE_SENSOR_MASK_TRAVEL) != 0u) {
         live_runtime.travel_enabled = true;
@@ -442,18 +491,34 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
     if ((resp->selected_sensor_mask & LIVE_SENSOR_MASK_IMU) != 0u &&
         !add_repeating_timer_us(-(int64_t)live_runtime.imu_period_us, live_imu_cb, NULL, &live_runtime.imu_timer)) {
         LOG("LIVE", "Start failed: IMU timer failed (period=%u us)\n", (unsigned)live_runtime.imu_period_us);
-        live_stream_core0_stop();
-        resp->result = LIVE_START_RESULT_INTERNAL_ERROR;
-        return false;
+        resp->accepted_sensor_mask &= ~LIVE_SENSOR_INSTANCE_MASK_IMU;
+        resp->accepted_imu_hz = 0u;
+        resp->imu_period_us = 0u;
+        resp->active_imu_count = 0u;
+        resp->active_imu_mask = 0u;
+        live_runtime.imu_period_us = 0u;
+        live_runtime.active_imu_count = 0u;
+        live_runtime.active_imu_mask = 0u;
+        live_runtime.imu_max_ticks_per_slot = 0u;
+        resp->selected_sensor_mask = live_selected_stream_mask_from_instances(resp->accepted_sensor_mask);
     }
     if ((resp->selected_sensor_mask & LIVE_SENSOR_MASK_IMU) != 0u) {
         live_runtime.imu_enabled = true;
     }
 #endif
 
+    if (resp->accepted_sensor_mask == 0u) {
+        LOG("LIVE", "Start failed: none of the requested sensors could start after timer setup (mask=0x%08x)\n",
+            (unsigned)requested_mask);
+        resp->result = LIVE_START_RESULT_NO_SENSORS_STARTED;
+        return false;
+    }
+
+    live_runtime.accepted_sensor_mask = resp->accepted_sensor_mask;
     live_runtime.active = true;
     live_stream_shared.active = true;
     live_stream_shared.selected_sensor_mask = resp->selected_sensor_mask;
+    live_stream_shared.accepted_sensor_mask = resp->accepted_sensor_mask;
     live_stream_shared.active_imu_mask = resp->active_imu_mask;
     live_stream_shared.start_response = *resp;
     resp->result = LIVE_START_RESULT_OK;

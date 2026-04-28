@@ -613,6 +613,8 @@ static bool live_send_session_header(struct tcpserver *server) {
         .session_start_monotonic_us = live_stream_shared.start_response.session_start_monotonic_us,
         .active_imu_mask = live_stream_shared.start_response.active_imu_mask,
         .flags = LIVE_SESSION_FLAG_CALIBRATED_ONLY | LIVE_SESSION_FLAG_MUTUALLY_EXCLUSIVE_WITH_RECORDING,
+        .requested_sensor_mask = live_stream_shared.start_response.requested_sensor_mask,
+        .accepted_sensor_mask = live_stream_shared.start_response.accepted_sensor_mask,
     };
 
 #if HAS_IMU
@@ -799,7 +801,7 @@ static void live_queue_start_request(struct tcpserver *server, const struct live
 
     live_stream_shared.start_request = (struct live_start_request){
         .protocol_version = LIVE_PROTOCOL_VERSION,
-        .sensor_mask = frame->sensor_mask,
+        .requested_sensor_mask = frame->requested_sensor_mask,
         .requested_travel_hz = frame->travel_hz,
         .requested_imu_hz = frame->imu_hz,
         .requested_gps_fix_hz = frame->gps_fix_hz,

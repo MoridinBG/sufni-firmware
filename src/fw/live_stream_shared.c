@@ -31,6 +31,7 @@ void live_stream_shared_reset(void) {
     memset(&live_stream_shared.gps_stats, 0, sizeof(live_stream_shared.gps_stats));
     live_stream_shared.control_state = LIVE_CONTROL_IDLE;
     live_stream_shared.selected_sensor_mask = 0;
+    live_stream_shared.accepted_sensor_mask = 0;
     live_stream_shared.active_imu_mask = 0;
     live_stream_shared.active = false;
     live_stream_reset_slots();

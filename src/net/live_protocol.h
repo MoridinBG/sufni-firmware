@@ -4,11 +4,25 @@
 #include <stdint.h>
 
 #define LIVE_PROTOCOL_MAGIC   0x4556494Cu
-#define LIVE_PROTOCOL_VERSION 1u
+#define LIVE_PROTOCOL_VERSION 2u
 
 #define LIVE_SENSOR_MASK_TRAVEL 0x01u
 #define LIVE_SENSOR_MASK_IMU    0x02u
 #define LIVE_SENSOR_MASK_GPS    0x04u
+
+#define LIVE_SENSOR_INSTANCE_MASK_FORK_TRAVEL  0x00000001u
+#define LIVE_SENSOR_INSTANCE_MASK_SHOCK_TRAVEL 0x00000002u
+#define LIVE_SENSOR_INSTANCE_MASK_FRAME_IMU    0x00000004u
+#define LIVE_SENSOR_INSTANCE_MASK_FORK_IMU     0x00000008u
+#define LIVE_SENSOR_INSTANCE_MASK_REAR_IMU     0x00000010u
+#define LIVE_SENSOR_INSTANCE_MASK_GPS          0x00000020u
+
+#define LIVE_SENSOR_INSTANCE_MASK_TRAVEL                                                                               \
+    (LIVE_SENSOR_INSTANCE_MASK_FORK_TRAVEL | LIVE_SENSOR_INSTANCE_MASK_SHOCK_TRAVEL)
+#define LIVE_SENSOR_INSTANCE_MASK_IMU                                                                                  \
+    (LIVE_SENSOR_INSTANCE_MASK_FRAME_IMU | LIVE_SENSOR_INSTANCE_MASK_FORK_IMU | LIVE_SENSOR_INSTANCE_MASK_REAR_IMU)
+#define LIVE_SENSOR_INSTANCE_MASK_ALL                                                                                  \
+    (LIVE_SENSOR_INSTANCE_MASK_TRAVEL | LIVE_SENSOR_INSTANCE_MASK_IMU | LIVE_SENSOR_INSTANCE_MASK_GPS)
 
 #define LIVE_SESSION_FLAG_CALIBRATED_ONLY                   0x01u
 #define LIVE_SESSION_FLAG_MUTUALLY_EXCLUSIVE_WITH_RECORDING 0x02u
@@ -39,7 +53,7 @@ struct live_frame_header {
 } __attribute__((packed));
 
 struct live_start_request_frame {
-    uint32_t sensor_mask;
+    uint32_t requested_sensor_mask;
     uint32_t travel_hz;
     uint32_t imu_hz;
     uint32_t gps_fix_hz;
@@ -70,6 +84,8 @@ struct live_session_header_frame {
     float imu_accel_lsb_per_g[3];
     float imu_gyro_lsb_per_dps[3];
     uint32_t flags;
+    uint32_t requested_sensor_mask;
+    uint32_t accepted_sensor_mask;
 } __attribute__((packed));
 
 struct live_batch_payload {

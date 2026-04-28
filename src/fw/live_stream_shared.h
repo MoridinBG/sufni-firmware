@@ -48,13 +48,12 @@ enum live_start_result {
     LIVE_START_RESULT_OK = 0,
     LIVE_START_RESULT_INVALID_REQUEST = -1,
     LIVE_START_RESULT_BUSY = -2,
-    LIVE_START_RESULT_UNAVAILABLE = -3,
-    LIVE_START_RESULT_INTERNAL_ERROR = -4,
+    LIVE_START_RESULT_NO_SENSORS_STARTED = -5,
 };
 
 struct live_start_request {
     uint32_t protocol_version;
-    uint32_t sensor_mask;
+    uint32_t requested_sensor_mask;
     uint32_t requested_travel_hz;
     uint32_t requested_imu_hz;
     uint32_t requested_gps_fix_hz;
@@ -64,6 +63,8 @@ struct live_start_response {
     int32_t result;
     uint32_t session_id;
     uint32_t selected_sensor_mask;
+    uint32_t requested_sensor_mask;
+    uint32_t accepted_sensor_mask;
     uint32_t accepted_travel_hz;
     uint32_t accepted_imu_hz;
     uint32_t accepted_gps_fix_hz;
@@ -112,6 +113,7 @@ struct live_stream_shared_state {
     volatile uint32_t control_state;
     volatile bool active;
     volatile uint32_t selected_sensor_mask;
+    volatile uint32_t accepted_sensor_mask;
     volatile uint32_t active_imu_mask;
 
     struct live_start_request start_request;
