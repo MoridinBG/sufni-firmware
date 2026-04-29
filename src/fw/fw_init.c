@@ -63,7 +63,7 @@ static void init_gps_sensor(void) {
     gps.on_fix = gps_fix_router_on_fix;
     if (gps_sensor_init(&gps)) {
         LOG("INIT", "GPS initialized\n");
-        if (!gps_sensor_configure(&gps, 1000 / GPS_SAMPLE_RATE, true, true, true, true, false)) {
+        if (!gps_sensor_configure(&gps, 1000 / config.gps_sample_rate, true, true, true, true, false)) {
             LOG("INIT", "GPS configuration failed\n");
         }
         sleep_ms(50);
@@ -138,12 +138,15 @@ static void init_storage(ssd1306_t *disp) {
     LOG("INIT", "Storage initialized\n");
 }
 
-static void init_runtime(ssd1306_t *disp) {
+static void init_config(ssd1306_t *disp) {
     if (!load_config()) {
         halt_with_message(disp, "CONF ERR");
     }
-    LOG("INIT", "Config loaded\n");
+    LOG("INIT", "Config loaded: travel=%uHz imu=%uHz gps=%uHz\n", (unsigned)config.travel_sample_rate,
+        (unsigned)config.imu_sample_rate, (unsigned)config.gps_sample_rate);
+}
 
+static void init_runtime(void) {
     cyw43_arch_init_with_country(config.country);
     setup_ntp(config.ntp_server);
     setenv("TZ", config.timezone, 1);
@@ -189,9 +192,6 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
     live_watchdog_diag_init();
 
     init_travel_sensors();
-#if HAS_GPS
-    init_gps_sensor();
-#endif
 #if HAS_IMU
     init_imu_sensors();
 #endif
@@ -204,9 +204,14 @@ enum state fw_init(ssd1306_t *disp, struct ds3231 *rtc, struct calibration_ctx *
         return MSC;
     }
 #endif
+    // GPS needs config for rate setting
+    init_config(disp);
+#if HAS_GPS
+    init_gps_sensor();
+#endif
 
     multicore_launch_core1(&core1_worker_main);
-    init_runtime(disp);
+    init_runtime();
 
     // Sleep/wake restores these registers after deep sleep, so capture the post-init baseline once here.
     power_state->scb_orig = scb_hw->scr;

@@ -114,16 +114,19 @@ In general, only a single client can connect to the device.
 
 ### CONFIG keys
 
-| Key          | Default          | Description                                                                 |
-| ------------ | ---------------- | --------------------------------------------------------------------------- |
-| `WIFI_MODE`  | `STA`            | `STA` (join existing network) or `AP` (create access point)                 |
-| `STA_SSID`   | `sst`            | SSID for station mode (also accepted as `SSID`)                             |
-| `STA_PSK`    | `changemeplease` | Password for station mode (also accepted as `PSK`)                          |
-| `AP_SSID`    | `SufniDAQ`       | SSID when in AP mode                                                        |
-| `AP_PSK`     | `changemeplease` | Password when in AP mode (minimum 8 characters)                             |
-| `NTP_SERVER` | `pool.ntp.org`   | NTP server hostname for time sync (STA mode only)                           |
-| `COUNTRY`    | `HU`             | 2-letter country code for WiFi regulatory domain                            |
-| `TIMEZONE`   | `UTC0`           | POSIX TZ string, or a timezone name resolved via `zones.csv` on the SD card |
+| Key                  | Default          | Description                                                                 |
+| -------------------- | ---------------- | --------------------------------------------------------------------------- |
+| `WIFI_MODE`          | `STA`            | `STA` (join existing network) or `AP` (create access point)                 |
+| `STA_SSID`           | `sst`            | SSID for station mode (also accepted as `SSID`)                             |
+| `STA_PSK`            | `changemeplease` | Password for station mode (also accepted as `PSK`)                          |
+| `AP_SSID`            | `SufniDAQ`       | SSID when in AP mode                                                        |
+| `AP_PSK`             | `changemeplease` | Password when in AP mode (minimum 8 characters)                             |
+| `NTP_SERVER`         | `pool.ntp.org`   | NTP server hostname for time sync (STA mode only)                           |
+| `COUNTRY`            | `HU`             | 2-letter country code for WiFi regulatory domain                            |
+| `TIMEZONE`           | `UTC0`           | POSIX TZ string, or a timezone name resolved via `zones.csv` on the SD card |
+| `TRAVEL_SAMPLE_RATE` | `200`            | Travel sensor sampling rate in Hz                                           |
+| `IMU_SAMPLE_RATE`    | `200`            | IMU sampling rate in Hz                                                     |
+| `GPS_SAMPLE_RATE`    | `1`              | GPS fix output rate in Hz                                                   |
 
 In STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` at least 8 characters. If validation fails the `CONFIG` file is rejected and built-in defaults are used. See [ARCHITECTURE.md](ARCHITECTURE.md) for field sizes and additional rules.
 

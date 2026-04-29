@@ -190,9 +190,9 @@ Core 0 owns `FREE -> FILLING -> READY`. Core 1 owns `READY -> SENDING -> FREE`. 
 
 Recording buffers:
 
-- **Travel**: 1000 Hz, buffer 2048 records (4 bytes each = 8 KB)
-- **IMU**: 1000 Hz, buffer scales with IMU count: `(IMU_COUNT + 1) * 512` records (12 bytes each)
-- **GPS**: Fix interval 300ms, poll interval 200ms, buffer 30 records (46 bytes each). GPS data flows through a callback (`on_gps_fix`) rather than a dedicated timer-fill pattern; the callback writes directly to the GPS buffer during `RECORD` state.
+- **Travel**: configurable via `TRAVEL_SAMPLE_RATE` (default 200 Hz), buffer 2048 records (4 bytes each = 8 KB)
+- **IMU**: configurable via `IMU_SAMPLE_RATE` (default 200 Hz), buffer scales with IMU count: `(IMU_COUNT + 1) * 512` records (12 bytes each)
+- **GPS**: fix output rate configurable via `GPS_SAMPLE_RATE` (default 1 Hz), poll interval 200ms, buffer 30 records (46 bytes each). GPS data flows through a callback (`on_gps_fix`) rather than a dedicated timer-fill pattern; the callback writes directly to the GPS buffer during `RECORD` state.
 
 Live preview defaults and capacities:
 
@@ -542,17 +542,20 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 
 The `CONFIG` file is a plain-text `key=value` file (one entry per line, `=` delimiter). Unrecognized keys are ignored; missing keys retain their defaults. Parsed by `config_load_file()` in `src/util/config.c`.
 
-| Key          | Default          | Max size  | Description                                                                   |
-| ------------ | ---------------- | --------- | ----------------------------------------------------------------------------- |
-| `WIFI_MODE`  | `STA`            | enum      | WiFi mode: `STA` (join existing network) or `AP` (create access point)        |
-| `STA_SSID`   | `sst`            | 33 bytes  | SSID for station mode (also accepted as `SSID` for backwards compatibility)   |
-| `STA_PSK`    | `changemeplease` | 64 bytes  | Password for station mode (also accepted as `PSK`)                            |
-| `AP_SSID`    | `SufniDAQ`       | 33 bytes  | SSID when in AP mode                                                          |
-| `AP_PSK`     | `changemeplease` | 64 bytes  | Password when in AP mode (minimum 8 characters)                               |
-| `NTP_SERVER` | `pool.ntp.org`   | 264 bytes | NTP server hostname for time sync                                             |
-| `COUNTRY`    | `HU`             | uint32    | 2-letter country code for WiFi regulatory domain (maps to `CYW43_COUNTRY()`)  |
-| `TIMEZONE`   | `UTC0`           | 100 bytes | POSIX TZ string, or a timezone name looked up from `zones.csv` on the SD card |
+| Key                  | Default          | Max size  | Description                                                                   |
+| -------------------- | ---------------- | --------- | ----------------------------------------------------------------------------- |
+| `WIFI_MODE`          | `STA`            | enum      | WiFi mode: `STA` (join existing network) or `AP` (create access point)        |
+| `STA_SSID`           | `sst`            | 33 bytes  | SSID for station mode (also accepted as `SSID` for backwards compatibility)   |
+| `STA_PSK`            | `changemeplease` | 64 bytes  | Password for station mode (also accepted as `PSK`)                            |
+| `AP_SSID`            | `SufniDAQ`       | 33 bytes  | SSID when in AP mode                                                          |
+| `AP_PSK`             | `changemeplease` | 64 bytes  | Password when in AP mode (minimum 8 characters)                               |
+| `NTP_SERVER`         | `pool.ntp.org`   | 264 bytes | NTP server hostname for time sync                                             |
+| `COUNTRY`            | `HU`             | uint32    | 2-letter country code for WiFi regulatory domain (maps to `CYW43_COUNTRY()`)  |
+| `TIMEZONE`           | `UTC0`           | 100 bytes | POSIX TZ string, or a timezone name looked up from `zones.csv` on the SD card |
+| `TRAVEL_SAMPLE_RATE` | `200`            | uint16    | Travel sensor sampling rate in Hz (must be > 0)                               |
+| `IMU_SAMPLE_RATE`    | `200`            | uint16    | IMU sampling rate in Hz (must be > 0)                                         |
+| `GPS_SAMPLE_RATE`    | `1`              | uint16    | GPS fix output rate in Hz (must be > 0)                                       |
 
-Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. If parsing or validation fails, the file is rejected and defaults are used.
+Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. Sample rate keys must parse as non-zero uint16 values. If parsing or validation fails, the file is rejected and defaults are used.
 
 The `TIMEZONE` value is first checked against the `zones.csv` lookup table (format: `Name,"POSIX TZ string"` per line). If a match is found, the resolved POSIX string is used; otherwise the raw value is passed directly to `setenv("TZ", ...)`. This allows either a human-readable timezone name (e.g. `Europe/Budapest`) or a raw POSIX TZ string (e.g. `CET-1CEST,M3.5.0,M10.5.0/3`).
