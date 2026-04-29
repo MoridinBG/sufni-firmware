@@ -6,11 +6,7 @@
 #include "pushbutton.h"
 #include "../util/log.h"
 
-// Tactile mechanical buttons typically bounce for a few milliseconds per transition,
-// with the contact rapidly chattering between open and closed before settling. The
-// debounce window must outlast the longest expected bounce burst with margin; 15 ms
-// is well above typical bounce duration and still well below the threshold of human
-// perception, so a press feels instantaneous.
+// 15 ms outlasts typical contact bounce while staying below the threshold of human perception.
 #define PUSHBUTTON_DEBOUNCE_US  15000
 #define PUSHBUTTON_LONGPRESS_US 1000000
 
@@ -29,11 +25,16 @@ static int64_t longpress_callback(alarm_id_t id, void *user_data) {
     return 0;
 }
 
-// Fires once the line has been quiet for PUSHBUTTON_DEBOUNCE_US. A bounce burst that
-// briefly reverts to the original level produces no dispatch because the read here
-// matches stable_state.
+// Fires once the line has been quiet for PUSHBUTTON_DEBOUNCE_US; if a newer edge arrived
+// meanwhile, returning a positive delta reuses this same slot for the next firing.
 static int64_t debounce_callback(alarm_id_t id, void *user_data) {
     struct button *btn = user_data;
+    uint64_t now = time_us_64();
+    uint64_t since_last_edge = now - btn->last_edge_us;
+    if (since_last_edge < PUSHBUTTON_DEBOUNCE_US) {
+        return (int64_t)(PUSHBUTTON_DEBOUNCE_US - since_last_edge);
+    }
+
     btn->debounce_alarm = -1;
     bool current = gpio_get(btn->gpio);
     if (current == btn->stable_state) {
@@ -52,8 +53,7 @@ static int64_t debounce_callback(alarm_id_t id, void *user_data) {
             cancel_alarm(btn->longpress_alarm);
             btn->longpress_alarm = -1;
         }
-        // Suppress the short-press dispatch when the long-press already fired, so a single
-        // long hold yields exactly one event.
+        // Suppress the short-press dispatch when long-press already fired so a hold yields one event.
         if (!btn->longpress_fired && btn->onpress != NULL) {
             LOG("BUTTON", "Button %u press\n", btn->gpio);
             btn->onpress(btn->user_data);
@@ -62,18 +62,16 @@ static int64_t debounce_callback(alarm_id_t id, void *user_data) {
     return 0;
 }
 
-// IRQ for any registered button pin. Runs in the GPIO IRQ context, so it must stay short
-// and avoid blocking work; the actual decision is deferred to the alarm callback.
+// Runs in GPIO IRQ. We never cancel+re-add here: under a tail-chaining bounce burst
+// cancel_alarm can't free slots until the timer IRQ runs, so each edge would consume a fresh slot.
 static void gpio_callback(uint gpio, uint32_t events) {
     (void)events;
     struct button *btn = buttons[gpio];
     if (NULL != btn && btn->enabled) {
-        // Sliding window: each new edge resets the debounce countdown so the alarm only fires
-        // once the line has been quiet for the full window.
-        if (btn->debounce_alarm != -1) {
-            cancel_alarm(btn->debounce_alarm);
+        btn->last_edge_us = time_us_64();
+        if (btn->debounce_alarm == -1) {
+            btn->debounce_alarm = add_alarm_in_us(PUSHBUTTON_DEBOUNCE_US, debounce_callback, btn, true);
         }
-        btn->debounce_alarm = add_alarm_in_us(PUSHBUTTON_DEBOUNCE_US, debounce_callback, btn, true);
     }
 }
 
@@ -111,9 +109,7 @@ void disable_button(uint gpio, bool release_only) {
     gpio_set_irq_enabled(gpio, mask, false);
 }
 
-// Re-enable a previously disabled button. The first edge after this call schedules a
-// fresh debounce window, and stable_state is resampled so a level change that happened
-// while the button was disabled does not produce a phantom transition.
+// Resample stable_state so a level change that happened while disabled does not produce a phantom transition.
 void enable_button(uint gpio) {
     struct button *btn = buttons[gpio];
     btn->stable_state = gpio_get(gpio);
