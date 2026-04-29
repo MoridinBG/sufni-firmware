@@ -11,14 +11,7 @@
 #include "../sensor/gps/gps_sensor.h"
 #endif
 
-extern const uint16_t TRAVEL_SAMPLE_RATE;
-
-#if HAS_IMU
-extern const uint16_t IMU_SAMPLE_RATE;
-#endif
-
 #if HAS_GPS
-extern const uint16_t GPS_SAMPLE_RATE;
 void recording_on_gps_fix(const struct gps_telemetry *telemetry);
 void recording_start_gps_timer(ssd1306_t *disp);
 void recording_stop_gps_timer(void);

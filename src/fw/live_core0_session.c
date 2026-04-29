@@ -10,6 +10,7 @@
 #include "../ntp/ntp.h"
 #include "../sensor/imu/imu_sensor.h"
 #include "../sensor/travel/travel_sensor.h"
+#include "../util/config.h"
 #include "../util/log.h"
 
 #include "hardware/timer.h"
@@ -372,8 +373,8 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
         if ((resp->accepted_sensor_mask & LIVE_SENSOR_INSTANCE_MASK_TRAVEL) == 0u) {
             LOG("LIVE", "Start failed: no travel sensors available\n");
         } else {
-            resp->accepted_travel_hz =
-                live_requested_rate_or_default(req->requested_travel_hz, TRAVEL_SAMPLE_RATE, LIVE_MAX_TRAVEL_HZ);
+            resp->accepted_travel_hz = live_requested_rate_or_default(req->requested_travel_hz,
+                                                                      config.travel_sample_rate, LIVE_MAX_TRAVEL_HZ);
             resp->travel_period_us = 1000000u / resp->accepted_travel_hz;
             resp->accepted_travel_hz = 1000000u / resp->travel_period_us;
             live_runtime.travel_period_us = resp->travel_period_us;
@@ -406,7 +407,7 @@ bool live_stream_core0_start(const struct live_start_request *req, struct live_s
             LOG("LIVE", "Start failed: no IMU sensors available\n");
         } else {
             resp->accepted_imu_hz =
-                live_requested_rate_or_default(req->requested_imu_hz, IMU_SAMPLE_RATE, LIVE_MAX_IMU_HZ);
+                live_requested_rate_or_default(req->requested_imu_hz, config.imu_sample_rate, LIVE_MAX_IMU_HZ);
             resp->imu_period_us = 1000000u / resp->accepted_imu_hz;
             resp->accepted_imu_hz = 1000000u / resp->imu_period_us;
             live_runtime.imu_period_us = resp->imu_period_us;

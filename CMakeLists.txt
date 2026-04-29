@@ -237,6 +237,11 @@ endif()
 if(NOT GPS_MODULE STREQUAL "NONE")
     target_sources(sufni-suspension-telemetry PRIVATE
         src/sensor/gps/gps_sensor.c
+    )
+endif()
+
+if(GPS_MODULE STREQUAL "LC76G")
+    target_sources(sufni-suspension-telemetry PRIVATE
         src/sensor/gps/nmea_util.c
         src/sensor/gps/lc76g.c
     )
@@ -248,6 +253,11 @@ endif()
 
 if(GPS_MODULE STREQUAL "LC76G")
     target_compile_definitions(sufni-suspension-telemetry PUBLIC GPS_MODULE=GPS_LC76G)
+elseif(GPS_MODULE STREQUAL "M8N")
+    target_sources(sufni-suspension-telemetry PRIVATE
+        src/sensor/gps/m8n.c
+    )
+    target_compile_definitions(sufni-suspension-telemetry PUBLIC GPS_MODULE=GPS_M8N)
 else()
     target_compile_definitions(sufni-suspension-telemetry PUBLIC GPS_MODULE=GPS_NONE)
 endif()

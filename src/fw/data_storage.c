@@ -7,6 +7,7 @@
 #include "sst.h"
 
 #include "../ntp/ntp.h"
+#include "../util/config.h"
 #include "../util/log.h"
 
 #include "ff.h"
@@ -116,13 +117,13 @@ static int open_datafile(void) {
     if (fr == FR_OK)
         fr = write_exact(&ch, sizeof(ch));
 
-    struct samplerate_record re = {CHUNK_TYPE_TRAVEL, TRAVEL_SAMPLE_RATE};
+    struct samplerate_record re = {CHUNK_TYPE_TRAVEL, config.travel_sample_rate};
     if (fr == FR_OK)
         fr = write_exact(&re, sizeof(re));
 
 #if HAS_IMU
     re.type = CHUNK_TYPE_IMU;
-    re.rate = IMU_SAMPLE_RATE;
+    re.rate = config.imu_sample_rate;
     if (fr == FR_OK)
         fr = write_exact(&re, sizeof(re));
 

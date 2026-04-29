@@ -87,6 +87,7 @@
 
 #define GPS_NONE  0
 #define GPS_LC76G 1
+#define GPS_M8N   2
 
 #ifndef GPS_MODULE
 #define GPS_MODULE GPS_NONE

@@ -18,6 +18,9 @@ struct config {
     char ntp_server[264];
     char timezone[100];
     uint32_t country;
+    uint16_t travel_sample_rate;
+    uint16_t imu_sample_rate;
+    uint16_t gps_sample_rate;
 };
 
 extern struct config config;

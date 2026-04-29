@@ -50,7 +50,8 @@ def generate():
 
     gps_modules = [
         {"name": "NONE", "display_name": "None"},
-        {"name": "LC76G", "display_name": "LC76G (UART)"}
+        {"name": "LC76G", "display_name": "LC76G (UART)"},
+        {"name": "M8N", "display_name": "M8N / BN-880 (UART)"}
     ]
 
     imu_models = [

@@ -1,9 +1,9 @@
 #include "sensor_setup.h"
 
 #if HAS_GPS
+#if GPS_MODULE == GPS_LC76G
 #include "../sensor/gps/lc76g.h"
 
-#if GPS_MODULE == GPS_LC76G
 struct gps_sensor gps = {
     .type = GPS_TYPE_LC76G,
     .protocol = GPS_PROTOCOL_UART,
@@ -18,6 +18,24 @@ struct gps_sensor gps = {
     .cold_start = lc76g_cold_start,
     .power_on = lc76g_power_on,
     .power_off = lc76g_power_off,
+};
+#elif GPS_MODULE == GPS_M8N
+#include "../sensor/gps/m8n.h"
+
+struct gps_sensor gps = {
+    .type = GPS_TYPE_M8N,
+    .protocol = GPS_PROTOCOL_UART,
+    .comm.uart = {GPS_UART_INST, GPS_PIN_TX, GPS_PIN_RX, GPS_BAUD_RATE},
+    .available = false,
+    .on_fix = NULL,
+    .init = m8n_init,
+    .configure = m8n_configure,
+    .process = m8n_process,
+    .send_command = m8n_send_command,
+    .hot_start = m8n_hot_start,
+    .cold_start = m8n_cold_start,
+    .power_on = m8n_power_on,
+    .power_off = m8n_power_off,
 };
 #else
 struct gps_sensor gps = {.available = false};

@@ -12,6 +12,7 @@
 enum gps_type {
     GPS_TYPE_LC76G,
     GPS_TYPE_GENERIC_NMEA,
+    GPS_TYPE_M8N,
 };
 
 // Communication Protocol Abstraction

@@ -8,6 +8,7 @@
 #include "sensor_setup.h"
 
 #include "../sensor/travel/travel_sensor.h"
+#include "../util/config.h"
 #include "../util/log.h"
 
 #include "hardware/timer.h"
@@ -18,14 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-const uint16_t TRAVEL_SAMPLE_RATE = 1000;
-
-#if HAS_IMU
-const uint16_t IMU_SAMPLE_RATE = 1000;
-#endif
-
 #if HAS_GPS
-const uint16_t GPS_SAMPLE_RATE = 10;
 // Drain the UART often enough that the RX buffer stays below full without busy-polling.
 static const int64_t GPS_RX_DRAIN_INTERVAL_US = -(int64_t)GPS_RX_BUFFER_SIZE * 1000000 / (GPS_BAUD_RATE / 10) / 2;
 #endif
@@ -350,13 +344,13 @@ void recording_start(ssd1306_t *disp) {
 #endif
     LOG("REC", "Recording to file index %d\n", index);
 
-    if (!add_repeating_timer_us(-1000000 / TRAVEL_SAMPLE_RATE, travel_cb, NULL, &travel_timer)) {
+    if (!add_repeating_timer_us(-1000000 / config.travel_sample_rate, travel_cb, NULL, &travel_timer)) {
         recording_error(disp, "TEL TMR ERR");
     }
 
 #if HAS_IMU
     bool imu_active = imu_frame.available || imu_fork.available || imu_rear.available;
-    if (imu_active && !add_repeating_timer_us(-1000000 / IMU_SAMPLE_RATE, imu_cb, NULL, &imu_timer)) {
+    if (imu_active && !add_repeating_timer_us(-1000000 / config.imu_sample_rate, imu_cb, NULL, &imu_timer)) {
         recording_error(disp, "IMU TMR ERR");
     }
 #endif

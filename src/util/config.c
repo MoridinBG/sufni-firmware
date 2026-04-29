@@ -17,6 +17,9 @@ struct config config = {
     .ntp_server = "pool.ntp.org",
     .country = CYW43_COUNTRY_HUNGARY,
     .timezone = "UTC0",
+    .travel_sample_rate = 200,
+    .imu_sample_rate = 200,
+    .gps_sample_rate = 1,
 };
 
 static void copy_config_string(char *dest, size_t dest_size, const char *src) {
@@ -37,6 +40,9 @@ static void reset_config_defaults(struct config *cfg) {
         .ntp_server = "pool.ntp.org",
         .country = CYW43_COUNTRY_HUNGARY,
         .timezone = "UTC0",
+        .travel_sample_rate = 200,
+        .imu_sample_rate = 200,
+        .gps_sample_rate = 1,
     };
 }
 
@@ -80,6 +86,16 @@ static bool parse_country_value(struct config *cfg, const char *value) {
         return false;
     }
     cfg->country = CYW43_COUNTRY(value[0], value[1], 0);
+    return true;
+}
+
+static bool parse_sample_rate_value(uint16_t *out, const char *value) {
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (end == value || parsed == 0 || parsed > UINT16_MAX) {
+        return false;
+    }
+    *out = (uint16_t)parsed;
     return true;
 }
 
@@ -136,6 +152,12 @@ bool config_load_file(const char *path, struct config *out) {
             parse_ok = parse_country_value(&parsed, value) && parse_ok;
         } else if (strcmp(key, "TIMEZONE") == 0) {
             resolve_timezone_string(&parsed, value);
+        } else if (strcmp(key, "TRAVEL_SAMPLE_RATE") == 0) {
+            parse_ok = parse_sample_rate_value(&parsed.travel_sample_rate, value) && parse_ok;
+        } else if (strcmp(key, "IMU_SAMPLE_RATE") == 0) {
+            parse_ok = parse_sample_rate_value(&parsed.imu_sample_rate, value) && parse_ok;
+        } else if (strcmp(key, "GPS_SAMPLE_RATE") == 0) {
+            parse_ok = parse_sample_rate_value(&parsed.gps_sample_rate, value) && parse_ok;
         }
     }
 
