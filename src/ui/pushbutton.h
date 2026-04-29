@@ -5,9 +5,11 @@
 
 struct button {
     uint gpio;
-    bool state;
+    bool stable_state; // true = released (pin high via pull-up), false = pressed
     bool enabled;
-    alarm_id_t alarm;
+    bool longpress_fired;
+    alarm_id_t debounce_alarm;
+    alarm_id_t longpress_alarm;
     void *user_data;
     void (*onpress)(void *user_data);
     void (*onlongpress)(void *user_data);
