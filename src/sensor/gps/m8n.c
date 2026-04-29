@@ -8,44 +8,40 @@
 #include <math.h>
 #include <string.h>
 
-#define M8N_PROCESS_MAX_BYTES          512
-#define M8N_UBX_MAX_PAYLOAD            512
-#define M8N_AUTOBAUD_FAST_WINDOW_MS    300
-#define M8N_AUTOBAUD_FACTORY_WINDOW_MS 1200
-#define M8N_AUTOBAUD_RELOCK_WINDOW_MS  1500
-#define M8N_UBX_SYNC_1                 0xB5
-#define M8N_UBX_SYNC_2                 0x62
-#define M8N_UBX_CLASS_ACK              0x05
-#define M8N_UBX_ID_ACK_NACK            0x00
-#define M8N_UBX_ID_ACK_ACK             0x01
-#define M8N_UBX_CLASS_CFG              0x06
-#define M8N_UBX_ID_CFG_CFG             0x09
-#define M8N_UBX_ID_CFG_MSG             0x01
-#define M8N_UBX_ID_CFG_GNSS            0x3E
-#define M8N_UBX_ID_CFG_NAV5            0x24
-#define M8N_UBX_ID_CFG_PRT             0x00
-#define M8N_UBX_ID_CFG_RATE            0x08
-#define M8N_UBX_ID_CFG_RST             0x04
-#define M8N_UBX_CLASS_NAV              0x01
-#define M8N_UBX_ID_NAV_PVT             0x07
-#define M8N_UBX_CLASS_RXM              0x02
-#define M8N_UBX_ID_RXM_PMREQ           0x41
-#define M8N_UBX_CLASS_NMEA             0xF0
-#define M8N_NAV_PVT_PAYLOAD_LEN        92
-#define M8N_MIN_FIX_INTERVAL_MS        67
-#define M8N_MAX_FIX_INTERVAL_MS        1000
-#define M8N_GNSS_ID_GPS                0
-#define M8N_GNSS_ID_SBAS               1
-#define M8N_GNSS_ID_GALILEO            2
-#define M8N_GNSS_ID_BEIDOU             3
-#define M8N_GNSS_ID_QZSS               5
-#define M8N_GNSS_ID_GLONASS            6
+#define M8N_PROCESS_MAX_BYTES   512
+#define M8N_UBX_MAX_PAYLOAD     512
+#define M8N_UBX_SYNC_1          0xB5
+#define M8N_UBX_SYNC_2          0x62
+#define M8N_UBX_CLASS_ACK       0x05
+#define M8N_UBX_ID_ACK_NACK     0x00
+#define M8N_UBX_ID_ACK_ACK      0x01
+#define M8N_UBX_CLASS_CFG       0x06
+#define M8N_UBX_ID_CFG_CFG      0x09
+#define M8N_UBX_ID_CFG_MSG      0x01
+#define M8N_UBX_ID_CFG_GNSS     0x3E
+#define M8N_UBX_ID_CFG_NAV5     0x24
+#define M8N_UBX_ID_CFG_PRT      0x00
+#define M8N_UBX_ID_CFG_RATE     0x08
+#define M8N_UBX_ID_CFG_RST      0x04
+#define M8N_UBX_CLASS_NAV       0x01
+#define M8N_UBX_ID_NAV_PVT      0x07
+#define M8N_UBX_CLASS_RXM       0x02
+#define M8N_UBX_ID_RXM_PMREQ    0x41
+#define M8N_UBX_CLASS_NMEA      0xF0
+#define M8N_NAV_PVT_PAYLOAD_LEN 92
+#define M8N_MIN_FIX_INTERVAL_MS 67
+#define M8N_MAX_FIX_INTERVAL_MS 1000
+#define M8N_GNSS_ID_GPS         0
+#define M8N_GNSS_ID_SBAS        1
+#define M8N_GNSS_ID_GALILEO     2
+#define M8N_GNSS_ID_BEIDOU      3
+#define M8N_GNSS_ID_QZSS        5
+#define M8N_GNSS_ID_GLONASS     6
 
 static volatile bool s_rx_enabled = false;
 
 typedef enum {
     PS_IDLE,
-    PS_NMEA,
     PS_UBX_SYNC2,
     PS_UBX_HEADER,
     PS_UBX_PAYLOAD,
@@ -54,8 +50,6 @@ typedef enum {
 } m8n_parse_state_t;
 
 static m8n_parse_state_t s_parse_state = PS_IDLE;
-static char s_nmea_line[128];
-static size_t s_nmea_pos = 0;
 static uint8_t s_ubx_header[4];
 static size_t s_ubx_header_pos = 0;
 static uint8_t s_ubx_payload[M8N_UBX_MAX_PAYLOAD];
@@ -64,8 +58,6 @@ static uint16_t s_ubx_payload_pos = 0;
 static uint8_t s_ubx_ck_a = 0;
 static uint8_t s_ubx_ck_b = 0;
 static uint8_t s_ubx_received_ck_a = 0;
-static uint32_t s_nmea_count = 0;
-static uint32_t s_ubx_count = 0;
 
 static bool s_waiting_for_ack = false;
 static uint8_t s_expected_ack_cls = 0;
@@ -80,74 +72,19 @@ static uint16_t s_poll_cap = 0;
 static int s_poll_payload_len = -1;
 static bool s_nav5_configured = false;
 
-static uint8_t m8n_hex_value(char c) {
-    if (c >= '0' && c <= '9') {
-        return (uint8_t)(c - '0');
-    }
-    if (c >= 'A' && c <= 'F') {
-        return (uint8_t)(c - 'A' + 10);
-    }
-    if (c >= 'a' && c <= 'f') {
-        return (uint8_t)(c - 'a' + 10);
-    }
-    return 0xFF;
-}
-
-static bool m8n_nmea_checksum_ok(const char *line) {
-    if (line[0] != '$') {
-        return false;
-    }
-
-    uint8_t checksum = 0;
-    size_t pos = 1;
-    while (line[pos] != '\0' && line[pos] != '*') {
-        checksum ^= (uint8_t)line[pos];
-        pos++;
-    }
-
-    if (line[pos] != '*' || line[pos + 1] == '\0' || line[pos + 2] == '\0') {
-        return false;
-    }
-
-    uint8_t high = m8n_hex_value(line[pos + 1]);
-    uint8_t low = m8n_hex_value(line[pos + 2]);
-    return high != 0xFF && low != 0xFF && checksum == (uint8_t)((high << 4) | low);
-}
-
-static void m8n_reset_parser(bool clear_counts) {
+static void m8n_reset_parser(void) {
     s_parse_state = PS_IDLE;
-    s_nmea_pos = 0;
     s_ubx_header_pos = 0;
     s_ubx_payload_len = 0;
     s_ubx_payload_pos = 0;
     s_ubx_ck_a = 0;
     s_ubx_ck_b = 0;
     s_ubx_received_ck_a = 0;
-
-    if (clear_counts) {
-        s_nmea_count = 0;
-        s_ubx_count = 0;
-    }
 }
 
 static void m8n_checksum_byte(uint8_t byte) {
     s_ubx_ck_a = (uint8_t)(s_ubx_ck_a + byte);
     s_ubx_ck_b = (uint8_t)(s_ubx_ck_b + s_ubx_ck_a);
-}
-
-static void m8n_finish_nmea_line(void) {
-    if (s_nmea_pos == 0) {
-        s_parse_state = PS_IDLE;
-        return;
-    }
-
-    s_nmea_line[s_nmea_pos] = '\0';
-    if (m8n_nmea_checksum_ok(s_nmea_line)) {
-        s_nmea_count++;
-    }
-
-    s_nmea_pos = 0;
-    s_parse_state = PS_IDLE;
 }
 
 static uint16_t m8n_read_u16(const uint8_t *payload, uint16_t offset) {
@@ -232,8 +169,6 @@ static void m8n_on_nav_pvt(const uint8_t *payload) {
 }
 
 static void m8n_on_ubx_frame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len) {
-    s_ubx_count++;
-
     if (cls == M8N_UBX_CLASS_ACK && (id == M8N_UBX_ID_ACK_ACK || id == M8N_UBX_ID_ACK_NACK) && len == 2) {
         if (s_waiting_for_ack && payload[0] == s_expected_ack_cls && payload[1] == s_expected_ack_id) {
             s_ack_result = (id == M8N_UBX_ID_ACK_ACK) ? 1 : 0;
@@ -259,22 +194,8 @@ static void m8n_on_ubx_frame(uint8_t cls, uint8_t id, const uint8_t *payload, ui
 static void m8n_parse_byte(uint8_t byte) {
     switch (s_parse_state) {
         case PS_IDLE:
-            if (byte == '$') {
-                s_nmea_pos = 0;
-                s_nmea_line[s_nmea_pos++] = (char)byte;
-                s_parse_state = PS_NMEA;
-            } else if (byte == M8N_UBX_SYNC_1) {
+            if (byte == M8N_UBX_SYNC_1) {
                 s_parse_state = PS_UBX_SYNC2;
-            }
-            break;
-
-        case PS_NMEA:
-            if (byte == '\r' || byte == '\n') {
-                m8n_finish_nmea_line();
-            } else if (byte >= 0x20 && byte < 0x7F && s_nmea_pos + 1 < sizeof(s_nmea_line)) {
-                s_nmea_line[s_nmea_pos++] = (char)byte;
-            } else {
-                m8n_reset_parser(false);
             }
             break;
 
@@ -297,7 +218,7 @@ static void m8n_parse_byte(uint8_t byte) {
             if (s_ubx_header_pos == sizeof(s_ubx_header)) {
                 s_ubx_payload_len = (uint16_t)s_ubx_header[2] | ((uint16_t)s_ubx_header[3] << 8);
                 if (s_ubx_payload_len > sizeof(s_ubx_payload)) {
-                    m8n_reset_parser(false);
+                    m8n_reset_parser();
                 } else if (s_ubx_payload_len == 0) {
                     s_parse_state = PS_UBX_CK_A;
                 } else {
@@ -323,12 +244,10 @@ static void m8n_parse_byte(uint8_t byte) {
             if (s_ubx_received_ck_a == s_ubx_ck_a && byte == s_ubx_ck_b) {
                 m8n_on_ubx_frame(s_ubx_header[0], s_ubx_header[1], s_ubx_payload, s_ubx_payload_len);
             }
-            m8n_reset_parser(false);
+            m8n_reset_parser();
             break;
     }
 }
-
-static uint32_t m8n_observed_frame_count(void) { return s_nmea_count + s_ubx_count; }
 
 static void gps_uart_irq_handler(void) {
     while (uart_is_readable(gps.comm.uart.instance)) {
@@ -353,32 +272,6 @@ static void m8n_uart_start(struct gps_sensor *gps, uint baudrate) {
     uart_init(gps->comm.uart.instance, baudrate);
     uart_set_fifo_enabled(gps->comm.uart.instance, true);
     m8n_reset_rx_buffer(gps);
-}
-
-static bool m8n_observe_baud(struct gps_sensor *gps, uint baudrate, uint32_t window_ms) {
-    LOG("M8N", "Autobaud probe: %u baud for %lums\n", baudrate, (unsigned long)window_ms);
-
-    if (s_rx_enabled) {
-        m8n_rx_disable(gps);
-    }
-    m8n_uart_start(gps, baudrate);
-    m8n_reset_parser(true);
-    m8n_rx_enable(gps);
-
-    absolute_time_t deadline = make_timeout_time_ms(window_ms);
-    while (!time_reached(deadline)) {
-        m8n_process(gps);
-        if (m8n_observed_frame_count() > 0) {
-            LOG("M8N", "Autobaud locked: %u baud (NMEA=%lu UBX=%lu)\n", baudrate, (unsigned long)s_nmea_count,
-                (unsigned long)s_ubx_count);
-            return true;
-        }
-        tight_loop_contents();
-    }
-
-    LOG("M8N", "Autobaud miss: %u baud (NMEA=%lu UBX=%lu)\n", baudrate, (unsigned long)s_nmea_count,
-        (unsigned long)s_ubx_count);
-    return false;
 }
 
 static void m8n_ubx_checksum_byte(uint8_t byte, uint8_t *ck_a, uint8_t *ck_b) {
@@ -480,40 +373,17 @@ static int m8n_poll_response(struct gps_sensor *gps, uint8_t cls, uint8_t id, co
     return payload_len;
 }
 
-static bool m8n_set_uart_baud(struct gps_sensor *gps, uint32_t baudrate) {
-    uint8_t payload[20] = {0};
-
-    payload[0] = 1;
-    m8n_write_u32(payload, 4, 0x000008D0);
-    m8n_write_u32(payload, 8, baudrate);
-    m8n_write_u16(payload, 12, 0x0007);
-    m8n_write_u16(payload, 14, 0x0003);
-
-    return m8n_send_cmd_wait(gps, M8N_UBX_CLASS_CFG, M8N_UBX_ID_CFG_PRT, payload, sizeof(payload), 1000);
-}
-
-static bool m8n_upgrade_9600_to_115200(struct gps_sensor *gps) {
-    LOG("M8N", "Attempting 9600 -> 115200 baud upgrade\n");
-    bool acked = m8n_set_uart_baud(gps, 115200);
-    if (!acked) {
-        LOG("M8N", "Baud upgrade command was not ACKed; relocking anyway\n");
+static bool m8n_probe_link(struct gps_sensor *gps) {
+    uint8_t payload[6];
+    int response_len =
+        m8n_poll_response(gps, M8N_UBX_CLASS_CFG, M8N_UBX_ID_CFG_RATE, NULL, 0, payload, sizeof(payload), 1000);
+    if (response_len != (int)sizeof(payload)) {
+        LOG("M8N", "UBX probe failed at configured baud=%u\n", gps->comm.uart.baudrate);
+        return false;
     }
 
-    m8n_rx_disable(gps);
-    uart_deinit(gps->comm.uart.instance);
-    sleep_ms(50);
-
-    if (m8n_observe_baud(gps, 115200, M8N_AUTOBAUD_RELOCK_WINDOW_MS)) {
-        return true;
-    }
-
-    LOG("M8N", "115200 relock failed after upgrade; checking 9600 fallback\n");
-    if (m8n_observe_baud(gps, 9600, M8N_AUTOBAUD_FACTORY_WINDOW_MS)) {
-        LOG("M8N", "Staying at 9600 baud fallback\n");
-        return true;
-    }
-
-    return false;
+    LOG("M8N", "UBX probe OK at configured baud=%u\n", gps->comm.uart.baudrate);
+    return true;
 }
 
 static uint16_t m8n_clamp_fix_interval(uint16_t fix_interval_ms) {
@@ -577,7 +447,7 @@ static bool m8n_configure_nav5(struct gps_sensor *gps) {
     if (ok) {
         s_nav5_configured = true;
     } else {
-        LOG("M8N", "CFG-NAV5 failed; continuing with current dynamic model\n");
+        LOG("M8N", "CFG-NAV5 failed\n");
     }
     return ok;
 }
@@ -588,6 +458,81 @@ static void m8n_set_gnss_block_enabled(uint8_t *block, bool enabled) {
     } else {
         block[4] &= (uint8_t)~0x01;
     }
+}
+
+static const char *m8n_gnss_name(uint8_t gnss_id) {
+    switch (gnss_id) {
+        case M8N_GNSS_ID_GPS:
+            return "GPS";
+        case M8N_GNSS_ID_SBAS:
+            return "SBAS";
+        case M8N_GNSS_ID_GALILEO:
+            return "Galileo";
+        case M8N_GNSS_ID_BEIDOU:
+            return "BeiDou";
+        case M8N_GNSS_ID_QZSS:
+            return "QZSS";
+        case M8N_GNSS_ID_GLONASS:
+            return "GLONASS";
+        default:
+            return NULL;
+    }
+}
+
+static void m8n_append_gnss_name(char *mix, size_t mix_size, size_t *mix_len, const char *name, bool *first) {
+    size_t sep_len = *first ? 0 : 2;
+    size_t name_len = strlen(name);
+    if (*mix_len + sep_len + name_len >= mix_size) {
+        return;
+    }
+
+    if (!*first) {
+        memcpy(&mix[*mix_len], ", ", sep_len);
+        *mix_len += sep_len;
+    }
+    memcpy(&mix[*mix_len], name, name_len);
+    *mix_len += name_len;
+    mix[*mix_len] = '\0';
+    *first = false;
+}
+
+static bool m8n_log_actual_gnss_mix(struct gps_sensor *gps) {
+    uint8_t payload[M8N_UBX_MAX_PAYLOAD];
+    int response_len =
+        m8n_poll_response(gps, M8N_UBX_CLASS_CFG, M8N_UBX_ID_CFG_GNSS, NULL, 0, payload, sizeof(payload), 1000);
+    if (response_len < 4 || response_len > (int)sizeof(payload)) {
+        return false;
+    }
+
+    uint8_t num_blocks = payload[3];
+    if (response_len < 4 + (int)num_blocks * 8) {
+        LOG("M8N", "Accepted GNSS mix unavailable: malformed CFG-GNSS len=%d blocks=%u\n", response_len, num_blocks);
+        return false;
+    }
+
+    char mix[64] = {0};
+    size_t mix_len = 0;
+    bool first = true;
+    for (uint8_t i = 0; i < num_blocks; i++) {
+        const uint8_t *block = &payload[4 + (size_t)i * 8];
+        if ((block[4] & 0x01) == 0) {
+            continue;
+        }
+
+        const char *name = m8n_gnss_name(block[0]);
+        if (name == NULL) {
+            continue;
+        }
+
+        m8n_append_gnss_name(mix, sizeof(mix), &mix_len, name, &first);
+    }
+
+    if (first) {
+        strcpy(mix, "none");
+    }
+
+    LOG("M8N", "Accepted GNSS mix: %s\n", mix);
+    return true;
 }
 
 static bool m8n_configure_gnss(struct gps_sensor *gps, bool gps_en, bool glonass_en, bool galileo_en, bool bds_en,
@@ -645,7 +590,7 @@ static bool m8n_configure_gnss(struct gps_sensor *gps, bool gps_en, bool glonass
     LOG("M8N", "Set CFG-GNSS blocks=%u\n", num_blocks);
     bool ok = m8n_send_cmd_wait(gps, M8N_UBX_CLASS_CFG, M8N_UBX_ID_CFG_GNSS, payload, (uint16_t)response_len, 1000);
     if (!ok) {
-        LOG("M8N", "CFG-GNSS failed; continuing with current constellation config\n");
+        LOG("M8N", "CFG-GNSS failed\n");
     }
     return ok;
 }
@@ -691,29 +636,18 @@ void m8n_init(struct gps_sensor *gps) {
     gpio_set_function(gps->comm.uart.rx_gpio, GPIO_FUNC_UART);
     irq_set_exclusive_handler(GPS_IRQ, gps_uart_irq_handler);
     m8n_clear_wait_state();
+    m8n_uart_start(gps, gps->comm.uart.baudrate);
+    m8n_reset_parser();
+    m8n_rx_enable(gps);
 
-    gps->available = false;
-    if (m8n_observe_baud(gps, 115200, M8N_AUTOBAUD_FAST_WINDOW_MS)) {
-        gps->available = true;
-        return;
-    }
-
-    bool locked_9600 = m8n_observe_baud(gps, 9600, M8N_AUTOBAUD_FACTORY_WINDOW_MS);
-    if (!locked_9600) {
-        m8n_rx_disable(gps);
-        uart_deinit(gps->comm.uart.instance);
-        LOG("M8N", "Autobaud failed; GPS unavailable\n");
-        return;
-    }
-
-    gps->available = m8n_upgrade_9600_to_115200(gps);
+    gps->available = m8n_probe_link(gps);
     if (gps->available) {
         return;
     }
 
     m8n_rx_disable(gps);
     uart_deinit(gps->comm.uart.instance);
-    LOG("M8N", "Baud upgrade left GPS unreachable\n");
+    LOG("M8N", "Init failed at configured baud\n");
 }
 
 bool m8n_configure(struct gps_sensor *gps, uint16_t fix_interval_ms, bool gps_en, bool glonass_en, bool galileo_en,
@@ -727,22 +661,30 @@ bool m8n_configure(struct gps_sensor *gps, uint16_t fix_interval_ms, bool gps_en
     LOG("M8N", "Configure: fix=%dms gps=%d glo=%d gal=%d bds=%d qzss=%d\n", fix_interval_ms, gps_en, glonass_en,
         galileo_en, bds_en, qzss_en);
 
-    bool rate_ok = m8n_configure_rate(gps, fix_interval_ms);
+    bool nav5_ok = m8n_configure_nav5(gps);
+    bool gnss_ok = false;
+    bool rate_ok = false;
     bool messages_ok = false;
-    if (rate_ok) {
+
+    if (nav5_ok) {
+        gnss_ok = m8n_configure_gnss(gps, gps_en, glonass_en, galileo_en, bds_en, qzss_en);
+    }
+    if (nav5_ok && gnss_ok) {
+        rate_ok = m8n_configure_rate(gps, fix_interval_ms);
+    }
+    if (nav5_ok && gnss_ok && rate_ok) {
         messages_ok = m8n_configure_messages(gps);
     }
 
-    if (!rate_ok || !messages_ok) {
-        LOG("M8N", "Configuration failed in critical data-path steps\n");
+    if (!nav5_ok || !gnss_ok || !rate_ok || !messages_ok) {
+        LOG("M8N", "Configuration failed\n");
         return false;
     }
 
-    bool nav5_ok = m8n_configure_nav5(gps);
-    bool gnss_ok = m8n_configure_gnss(gps, gps_en, glonass_en, galileo_en, bds_en, qzss_en);
     bool save_ok = m8n_save_config(gps);
+    m8n_log_actual_gnss_mix(gps);
 
-    LOG("M8N", "Configuration complete (nav5=%d gnss=%d save=%d)\n", nav5_ok, gnss_ok, save_ok);
+    LOG("M8N", "Configuration complete (save=%d)\n", save_ok);
     return true;
 }
 
