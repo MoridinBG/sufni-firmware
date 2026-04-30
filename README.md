@@ -2,11 +2,21 @@
 
 Firmware for a [Raspberry Pi Pico W](https://www.raspberrypi.com/products/pico-w/) / [Pico 2 W](https://www.raspberrypi.com/products/pico-2-w/) based mountain bike suspension telemetry data acquisition unit. Records suspension travel, IMU, and GPS data to SD card in a custom binary format (SST) for analysis in companion desktop and mobile applications.
 
+![pcb board](pics/pcb.jpg) 
+
+## Documentation
+
+- [docs/daq.md](docs/daq.md) — how to build the DAQ hardware: parts list, wiring, and assembly.
+- [docs/manual.md](docs/manual.md) — user manual for operating a built DAQ: buttons, calibration, recording, and network server.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — firmware internals: state machine, dual-core data pipeline, SST binary format, sensor abstraction, and protocols.
+
 ## Getting started
 
 ### 1. Clone and initialize submodules
 
-```sh
+```sh.
+
+
 git clone https://github.com/sghctoma/sufni-firmware.git
 cd sufni-firmware
 git submodule update --init --recursive

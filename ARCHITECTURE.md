@@ -26,11 +26,11 @@ Firmware for a Pico W / Pico 2 W based mountain bike suspension telemetry data a
 ```
 Core 0                                      FIFO + Shared RAM                     Core 1
 ┌────────────────────────────┐                                             ┌────────────────────────────┐
-│ State machine              │─ dispatch/storage control + status ───────>│ Dispatcher (`core1_worker`)│
-│ Sensor sampling timers     │<──────────── buffer acks / events ─────────│ Storage backend            │
+│ State machine              │─ dispatch/storage control + status ────────>│ Dispatcher (`core1_worker`)│
+│ Sensor sampling timers     │<──────────── buffer acks / events ──────────│ Storage backend            │
 │ GPS parsing + calibration  │                                             │ TCP server backend         │
-│ Display / buttons / WiFi   │══ live session state + slot pools ════════>│ Live framing + lwIP send   │
-│ Management request service │══ management shared state ═══════════════>│ Management protocol        │
+│ Display / buttons / WiFi   │══ live session state + slot pools ═════════>│ Live framing + lwIP send   │
+│ Management request service │══ management shared state ═════════════════>│ Management protocol        │
 └────────────────────────────┘                                             └────────────────────────────┘
 ```
 
@@ -87,16 +87,14 @@ The main loop in `src/fw/main.c` dispatches to a handler function indexed by the
 | `GPS_WAIT`  | GPS available during REC_START | Waits for reliable GPS fix (10 consecutive good fixes with 3D fix, >=6 sats, EPE<=6m). User can skip (left press) or confirm when ready.                                                                          |
 | `RECORD`    | After REC_START/GPS_WAIT       | Active data acquisition. Repeating timer callbacks sample sensors into buffers while the main loop idles in the `RECORD` slot.                                                                                    |
 | `REC_STOP`  | Left press in RECORD           | Stops timers, flushes remaining data, closes file.                                                                                                                                                                |
-| `SYNC_DATA` | Left long-press in IDLE        | Starts WiFi and runs the TCP server with live preview disabled. Clients pull recordings via the management protocol and then explicitly move verified downloads to `uploaded/` via a follow-up management action. |
-| `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves either the management protocol or live preview.                                                 |
+| `SERVE_TCP` | Right long-press in IDLE       | Connects WiFi, requests the Core 1 TCP backend, and stays in a non-blocking coordination loop while Core 1 serves the management protocol and/or live preview on the same port.                                   |
 | `MSC`       | USB cable detected at boot     | USB Mass Storage mode. SD card exposed directly to host. Mutually exclusive with normal operation.                                                                                                                |
 
 Button mapping:
 
 - **Left press**: Start/stop recording, confirm GPS, skip GPS wait
-- **Left long-press**: Start the download server (`SYNC_DATA`)
-- **Right press**: Sleep (from IDLE), set marker (during recording), request TCP backend stop from `SERVE_TCP` and `SYNC_DATA`
-- **Right long-press**: Start the live preview server (`SERVE_TCP`)
+- **Right press**: Sleep (from IDLE), set marker (during recording), request TCP backend stop from `SERVE_TCP`
+- **Right long-press**: Start the network server (`SERVE_TCP`)
 
 ## Core 1 dispatcher
 
@@ -347,7 +345,7 @@ On WiFi connect, syncs time from a configurable NTP server via SNTP. Updates bot
 
 ### TCP server (remote access and live preview)
 
-The TCP server listens on port 1557 with mDNS service `_gosst._tcp` in both AP and STA WiFi modes — WiFi mode is a link-layer choice only. The mDNS TXT record includes `bid=<hex>` with the board's unique ID (`pico_unique_board_id_t`), allowing clients to distinguish multiple boards on the same network. Core 1 owns the server loop while Core 0 remains in the `SYNC_DATA` or `SERVE_TCP` state handler. Both states run the same server; they differ only in whether the live-preview protocol is accepted (disabled in `SYNC_DATA`, enabled in `SERVE_TCP`).
+The TCP server listens on port 1557 with mDNS service `_gosst._tcp` in both AP and STA WiFi modes — WiFi mode is a link-layer choice only. The mDNS TXT record includes `bid=<hex>` with the board's unique ID (`pico_unique_board_id_t`), allowing clients to distinguish multiple boards on the same network. Core 1 owns the server loop while Core 0 remains in the `SERVE_TCP` state handler. Both the management protocol and the live preview protocol are accepted on the same connection; protocol selection happens per-connection from the magic bytes.
 
 The server uses a pluggable protocol handler architecture. On each new connection, the first bytes are matched against registered protocol detectors. Two protocols are supported:
 
