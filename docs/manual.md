@@ -33,6 +33,8 @@ The DAQ has:
 
 While idle, the display shows the time, the battery level, and which sensors the firmware can see right now.
 
+![idle screen](pics/screens/idle.png)
+
 ## Buttons
 
 The two buttons are context-sensitive. Each can be pressed briefly or held for a long press.
@@ -77,7 +79,12 @@ To re-trigger calibration on demand, hold the **Left** button while powering the
 Travel is calibrated for rotational sensors in a two step process:
 
 1. **Fully extend the suspension.** Lift the bike so the wheels hang free and the fork and shock are at their topped-out position. Press the left button to record the extended position.
+
+   ![travel calibration, extended step](pics/screens/cal_exp.png)
+
 2. **Compress the suspension.** Push the bike down so all measured susensions compress slightly. Press the left button to record the compressed position.
+
+   ![travel calibration, compressed step](pics/screens/cal_comp.png)
 
 This allows the firmware to determine the zero value for the sensor and in which directions do the values change as the suspension compresses.
 
@@ -88,7 +95,12 @@ After the second step, the device saves the travel calibration and moves on to t
 IMU calibration has two physical positions. Do this on a flat, level surface. The bike must stay still during each step.
 
 1. **Bike level on the ground, both wheels down.** Stand the bike upright on level ground. Try not to lean it sideways. Press the left button and wait. The firmware samples each IMU for a couple of seconds to learn its zero point and which way gravity points.
+
+   ![imu calibration, level step](pics/screens/imu_level.png)
+
 2. **Bike on it's rear wheel, front wheel up.** Lift the front of the bike until it rests on the rear wheel, with the frame tilted nose-up (a comfortable wheelie angle). Hold it steady. Press the left button. The firmware uses the change in gravity direction to figure out which way "forward" is for each IMU.
+
+   ![imu calibration, tilt step](pics/screens/imu_tilt.png)
 
 After the second step, the device saves the IMU calibration alongside the travel calibration.
 
@@ -105,16 +117,27 @@ From the idle screen, **press Left** to start a recording.
 What happens next depends on whether GPS is enabled and present:
 
 - **No GPS, or GPS not available**: recording starts immediately. The display switches to the recording screen.
+
+  ![recording](pics/screens/recording.png)
+
+  The two characters after `REC:` show which travel sensors are actually streaming to the file: `F` for fork, `S` for shock, and `.` for any sensor that was not detected at recording start.
+
 - **GPS enabled and available**: the device goes to the **GPS wait** screen first.
 
 ### Waiting for GPS
 
 When you start a recording with GPS configured and available, the device first goes to the GPS wait screen and tries to acquire a stable position fix. The screen shows the current fix status so you can see progress.
 
+![gps searching](pics/screens/gps_searching.png)
+
+`SAT` is the number of satellites currently in view; `EPE` is the estimated position error in meters. The fix gets more reliable as `SAT` grows and `EPE` shrinks.
+
 The flow from here:
 
 - **If you do not want to wait, press Left.** Recording starts right away, but the GPS module is powered off and no GPS data is written to the file. Use this when you do not need GPS for this ride.
 - **If you wait**, the screen will indicate when the fix is ready. Press **Left** to confirm and begin recording with GPS.
+
+  ![gps fix ready](pics/screens/gps_ok.png)
 
 ### Placing markers while you ride
 
@@ -130,6 +153,8 @@ Do not unplug power or remove the SD card while recording. Always stop first.
 
 To save battery while idle, **press Right** from the idle screen. The display turns off and the device enters deep sleep.
 
+![sleep](pics/screens/sleep.png)
+
 To wake it, **press any button**. The display comes back and you return to the idle screen. The clock and saved data are preserved across sleep.
 
 Sleep is only available from the idle screen. You cannot sleep while recording or while a server is running.
@@ -139,6 +164,10 @@ Sleep is only available from the idle screen. You cannot sleep while recording o
 To communicate with the device from a phone or computer - to download recordings, push a new configuration, set the clock, or watch sensor data in real time - start the network server.
 
 1. From the idle screen, **long-press Right**. The device joins WiFi (or starts its own access point, depending on the configuration file) and brings the server up.
+
+   ![server running](pics/screens/server_on.png)
+
+   The subtitle reflects what a connected client is doing: `connected` for an idle client, `live` while a live preview session is active, `mgmt` while it is downloading or pushing files. With no client attached the subtitle is omitted.
 2. Open the companion app and connect. The device advertises itself on the network, so the app should find it automatically. If you have multiple DAQs nearby, each one shows a unique board ID so you can pick the right one.
 3. From the app you can:
    - **List, download, and manage recordings.** Once the app has downloaded and verified a recording, it can mark it as uploaded; the device then moves that file into an `uploaded/` folder on the SD card. You can also trash recordings, which moves them to a `trash/` folder.
