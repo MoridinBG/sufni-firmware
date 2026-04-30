@@ -2,6 +2,47 @@
 
 Firmware for a Pico W / Pico 2 W based mountain bike suspension telemetry data acquisition unit. Part of the wider Sufni open-source project (MIT license). Records sensor data to SD card in a custom TLV binary format (SST) and can also expose live preview data over TCP. Desktop and mobile applications consume these files and streams for visualization and analysis.
 
+## Table of contents
+
+- [High-level overview](#high-level-overview)
+- [Firmware module layout](#firmware-module-layout)
+- [State machine](#state-machine)
+- [Core 1 dispatcher](#core-1-dispatcher)
+- [Data pipeline](#data-pipeline)
+  - [FIFO control mailbox](#fifo-control-mailbox)
+  - [Recording pipeline](#recording-pipeline)
+  - [Double-buffer scheme](#double-buffer-scheme)
+  - [Live preview pipeline](#live-preview-pipeline)
+  - [Sample rates and buffer sizes](#sample-rates-and-buffer-sizes)
+- [SST binary file format (v4)](#sst-binary-file-format-v4)
+  - [File header (16 bytes)](#file-header-16-bytes)
+  - [Chunk header (3 bytes, packed)](#chunk-header-3-bytes-packed)
+  - [Chunk types](#chunk-types)
+  - [File layout convention](#file-layout-convention)
+- [Sensor abstraction](#sensor-abstraction)
+  - [Travel sensors](#travel-sensors-srcsensortravel)
+  - [IMU sensors](#imu-sensors-srcsensorimu)
+  - [GPS sensor](#gps-sensor-srcsensorgps)
+- [Calibration system](#calibration-system-srcfwcalibration_c)
+  - [Calibration flow](#calibration-flow)
+  - [Storage format](#storage-format)
+- [Connectivity](#connectivity)
+  - [WiFi](#wifi)
+  - [NTP time sync](#ntp-time-sync)
+  - [TCP server (remote access and live preview)](#tcp-server-remote-access-and-live-preview)
+    - [Management protocol](#management-protocol)
+    - [Live preview protocol](#live-preview-protocol)
+  - [USB Mass Storage (MSC)](#usb-mass-storage-msc)
+- [Hardware interfaces](#hardware-interfaces)
+  - [PIO I2C](#pio-i2c)
+  - [Pin allocation (default)](#pin-allocation-default)
+- [Build system](#build-system)
+  - [CMake presets](#cmake-presets)
+  - [Key cmake variables](#key-cmake-variables)
+  - [External dependencies](#external-dependencies)
+- [SD card filesystem layout](#sd-card-filesystem-layout)
+  - [CONFIG file format](#config-file-format)
+
 ## High-level overview
 
 ```
