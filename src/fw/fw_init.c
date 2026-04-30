@@ -176,7 +176,7 @@ static void run_calibration(struct calibration_ctx *cal_ctx) {
 }
 
 static void register_buttons(const struct fw_button_handlers *button_handlers) {
-    create_button(BUTTON_LEFT, NULL, button_handlers->on_left_press, button_handlers->on_left_longpress);
+    create_button(BUTTON_LEFT, NULL, button_handlers->on_left_press, NULL);
     create_button(BUTTON_RIGHT, NULL, button_handlers->on_right_press, button_handlers->on_right_longpress);
 }
 

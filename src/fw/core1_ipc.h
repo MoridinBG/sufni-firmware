@@ -40,12 +40,6 @@ enum core1_dispatch_event {
     CORE1_DISPATCH_EVENT_BACKEND_ERROR = 4,
 };
 
-enum core1_network_session_kind {
-    CORE1_NETWORK_SESSION_NONE = 0,
-    CORE1_NETWORK_SESSION_SERVE_TCP = 1,
-    CORE1_NETWORK_SESSION_SYNC_DATA = 2,
-};
-
 enum core1_network_session_request_type {
     CORE1_NETWORK_SESSION_REQUEST_NONE = 0,
     CORE1_NETWORK_SESSION_REQUEST_START = 1,
@@ -75,9 +69,7 @@ enum network_session_error {
 };
 
 struct core1_network_session_config {
-    enum core1_network_session_kind session_kind;
     bool run_ntp;
-    bool allow_live_preview;
     bool enable_mdns;
     struct config config_snapshot;
 };

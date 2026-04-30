@@ -255,7 +255,6 @@ static void core1_run_tcp_backend(void) {
 
     session_id = core1_next_network_session_id++;
     options = (struct tcpserver_options){
-        .allow_live_preview = request.config.allow_live_preview,
         .enable_mdns = request.config.enable_mdns,
     };
 

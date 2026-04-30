@@ -14,12 +14,11 @@ enum state {
     GPS_WAIT,
     RECORD,
     REC_STOP,
-    SYNC_DATA,
     SERVE_TCP,
     MSC,
 };
 
-#define STATES_COUNT 10
+#define STATES_COUNT 9
 
 extern volatile enum state state;
 extern volatile bool marker_pending;

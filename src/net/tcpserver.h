@@ -33,7 +33,6 @@ struct tcpserver_protocol_ops {
 };
 
 struct tcpserver_options {
-    bool allow_live_preview;
     bool enable_mdns;
     void (*on_client_status_changed)(const struct tcpserver *server, enum network_client_status client_status,
                                      void *context);

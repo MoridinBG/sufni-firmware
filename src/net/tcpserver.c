@@ -60,9 +60,6 @@ static bool tcpserver_can_accept_client(const struct tcpserver *server) {
     for (index = 0; index < (sizeof(tcpserver_protocols) / sizeof(tcpserver_protocols[0])); ++index) {
         const struct tcpserver_protocol_registration *registration = &tcpserver_protocols[index];
 
-        if (registration->mode == TCPSERVER_PROTOCOL_LIVE && !server->options.allow_live_preview) {
-            continue;
-        }
         if (!registration->ops->can_accept(server)) {
             return false;
         }
@@ -140,9 +137,6 @@ static bool tcpserver_select_protocol(struct tcpserver *server) {
     for (index = 0; index < (sizeof(tcpserver_protocols) / sizeof(tcpserver_protocols[0])); ++index) {
         const struct tcpserver_protocol_registration *registration = &tcpserver_protocols[index];
 
-        if (registration->mode == TCPSERVER_PROTOCOL_LIVE && !server->options.allow_live_preview) {
-            continue;
-        }
         if (!registration->ops->detect(server)) {
             continue;
         }
@@ -424,7 +418,6 @@ bool tcpserver_init(struct tcpserver *server, const struct tcpserver_options *op
     server->last_error = 0;
     server->options = options != NULL ? *options
                                       : (struct tcpserver_options){
-                                            .allow_live_preview = true,
                                             .enable_mdns = true,
                                         };
     tcpserver_reset_connection_state(server);

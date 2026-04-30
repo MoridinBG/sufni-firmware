@@ -18,7 +18,6 @@ struct fw_power_state {
 
 struct fw_button_handlers {
     void (*on_left_press)(void *user_data);
-    void (*on_left_longpress)(void *user_data);
     void (*on_right_press)(void *user_data);
     void (*on_right_longpress)(void *user_data);
 };

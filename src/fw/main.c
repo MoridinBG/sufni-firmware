@@ -245,11 +245,7 @@ static void on_disabled_gps() { tight_loop_contents(); }
 // RECORD work runs from acquisition timers after recording_start, so the main loop only idles here.
 static void on_rec() { tight_loop_contents(); }
 
-static const char *tcp_session_status_subtitle(enum state session_state, enum network_client_status client_status) {
-    if (session_state != SERVE_TCP) {
-        return NULL;
-    }
-
+static const char *tcp_session_status_subtitle(enum network_client_status client_status) {
     switch (client_status) {
         case NETWORK_CLIENT_CONNECTED:
             return "connected";
@@ -270,11 +266,9 @@ static void display_tcp_session_status(const char *ready_message, const char *su
     }
 }
 
-static void run_tcp_session(enum state session_state, const char *ready_message, bool allow_live_preview) {
+static void run_tcp_session(const char *ready_message) {
     struct core1_network_session_config session_request = {
-        .session_kind = session_state == SERVE_TCP ? CORE1_NETWORK_SESSION_SERVE_TCP : CORE1_NETWORK_SESSION_SYNC_DATA,
         .run_ntp = true,
-        .allow_live_preview = allow_live_preview,
         .enable_mdns = true,
     };
     struct core1_network_session_status session_status = {0};
@@ -293,25 +287,21 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
         return;
     }
 
-    while (state == session_state) {
-        if (allow_live_preview) {
-            live_stream_core0_service();
-        }
+    while (state == SERVE_TCP) {
+        live_stream_core0_service();
 
         if (core1_read_network_session_status(&session_status) &&
             session_status.request_generation == request_generation) {
             if (!session_running && session_status.phase == NETWORK_SESSION_PHASE_RUNNING) {
                 displayed_client_status = session_status.client_status;
-                display_tcp_session_status(ready_message,
-                                           tcp_session_status_subtitle(session_state, displayed_client_status));
+                display_tcp_session_status(ready_message, tcp_session_status_subtitle(displayed_client_status));
                 session_running = true;
             }
 
             if (session_running && session_status.phase == NETWORK_SESSION_PHASE_RUNNING) {
                 if (session_status.client_status != displayed_client_status) {
                     displayed_client_status = session_status.client_status;
-                    display_tcp_session_status(ready_message,
-                                               tcp_session_status_subtitle(session_state, displayed_client_status));
+                    display_tcp_session_status(ready_message, tcp_session_status_subtitle(displayed_client_status));
                 }
             }
 
@@ -324,9 +314,7 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
         }
 
         if (tcp_session_stop_requested) {
-            if (allow_live_preview) {
-                live_stream_core0_stop();
-            }
+            live_stream_core0_stop();
             if (session_status.request_generation == request_generation && session_status.session_id != 0 &&
                 core1_request_network_session_stop(session_status.session_id, NULL)) {
                 tcp_session_stop_requested = false;
@@ -342,15 +330,11 @@ static void run_tcp_session(enum state session_state, const char *ready_message,
         sleep_ms(1000);
     }
 
-    if (allow_live_preview) {
-        live_stream_core0_stop();
-    }
+    live_stream_core0_stop();
     state = IDLE;
 }
 
-static void on_serve_tcp() { run_tcp_session(SERVE_TCP, "SERVER ON", true); }
-
-static void on_sync_data() { run_tcp_session(SYNC_DATA, "READY DL", false); }
+static void on_serve_tcp() { run_tcp_session("SERVER ON"); }
 
 static void (*state_handlers[STATES_COUNT])() = {
     on_idle,      /* IDLE */
@@ -364,7 +348,6 @@ static void (*state_handlers[STATES_COUNT])() = {
 #endif
     on_rec,       /* RECORD */
     on_rec_stop,  /* REC_STOP */
-    on_sync_data, /* SYNC_DATA */
     on_serve_tcp, /* SERVE_TCP */
     on_msc,       /* MSC */
 };
@@ -394,16 +377,6 @@ static void on_left_press(void *user_data) {
     }
 }
 
-static void on_left_longpress(void *user_data) {
-    switch (state) {
-        case IDLE:
-            state = SYNC_DATA;
-            break;
-        default:
-            break;
-    }
-}
-
 static void on_right_press(void *user_data) {
     switch (state) {
         case IDLE:
@@ -414,9 +387,6 @@ static void on_right_press(void *user_data) {
             LOG("REC", "Marker set\n");
             break;
         case SERVE_TCP:
-            tcp_session_stop_requested = true;
-            break;
-        case SYNC_DATA:
             tcp_session_stop_requested = true;
             break;
         default:
@@ -440,7 +410,6 @@ static void on_right_longpress(void *user_data) {
 int main() {
     const struct fw_button_handlers button_handlers = {
         .on_left_press = on_left_press,
-        .on_left_longpress = on_left_longpress,
         .on_right_press = on_right_press,
         .on_right_longpress = on_right_longpress,
     };
