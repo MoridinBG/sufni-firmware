@@ -2,7 +2,7 @@
 
 Firmware for a [Raspberry Pi Pico W](https://www.raspberrypi.com/products/pico-w/) / [Pico 2 W](https://www.raspberrypi.com/products/pico-2-w/) based mountain bike suspension telemetry data acquisition unit. Records suspension travel, IMU, and GPS data to SD card in a custom binary format (SST) for analysis in companion desktop and mobile applications.
 
-![pcb board](pics/pcb.jpg) 
+![pcb board](docs/pics/pcb.jpg) 
 
 ## Documentation
 
