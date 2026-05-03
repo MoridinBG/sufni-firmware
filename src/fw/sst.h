@@ -1,6 +1,7 @@
 #ifndef _SST_H
 #define _SST_H
 
+#include <stdint.h>
 #include <time.h>
 
 #include "../ui/pushbutton.h"
@@ -9,12 +10,18 @@
 #include "ssd1306.h"
 #include "tusb.h"
 
-#define CHUNK_TYPE_RATES    0x00
-#define CHUNK_TYPE_TRAVEL   0x01
-#define CHUNK_TYPE_MARKER   0x02
-#define CHUNK_TYPE_IMU      0x03
-#define CHUNK_TYPE_IMU_META 0x04
-#define CHUNK_TYPE_GPS      0x05
+#define CHUNK_TYPE_RATES       0x00
+#define CHUNK_TYPE_TRAVEL      0x01
+#define CHUNK_TYPE_MARKER      0x02
+#define CHUNK_TYPE_IMU         0x03
+#define CHUNK_TYPE_IMU_META    0x04
+#define CHUNK_TYPE_GPS         0x05
+#define CHUNK_TYPE_TEMPERATURE 0x06
+
+#define TEMPERATURE_LOCATION_FRAME 0
+#define TEMPERATURE_LOCATION_FORK  1
+#define TEMPERATURE_LOCATION_REAR  2
+#define TEMPERATURE_LOCATION_COUNT 3
 
 // Header for the entire SST file
 struct sst_header {
@@ -78,6 +85,13 @@ struct imu_record {
     int16_t ax, ay, az;
     int16_t gx, gy, gz;
 };
+
+// IMU temperature sample. One record is emitted per available IMU location.
+struct temperature_record {
+    int64_t timestamp_utc;
+    uint8_t location_id; // 0=Frame, 1=Fork, 2=Rear
+    float temperature_celsius;
+} __attribute__((packed));
 
 #define BUFFER_SIZE     2048
 #define GPS_BUFFER_SIZE 30
