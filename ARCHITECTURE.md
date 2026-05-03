@@ -28,13 +28,13 @@ Core 0                                      FIFO + Shared RAM                   
 ┌────────────────────────────┐                                             ┌────────────────────────────┐
 │ State machine              │─ dispatch/storage control + status ────────>│ Dispatcher (`core1_worker`)│
 │ Sensor sampling timers     │<──────────── buffer acks / events ──────────│ Storage backend            │
-│ GPS parsing + calibration  │                                             │ TCP server backend         │
-│ Display / buttons / WiFi   │══ live session state + slot pools ═════════>│ Live framing + lwIP send   │
-│ Management request service │══ management shared state ═════════════════>│ Management protocol        │
+│ GPS parsing + calibration  │                                             │ TCP server + WiFi backend  │
+│ Display / buttons          │══ network session status ══════════════════>│ Management protocol        │
+│ Live session service       │══ live session state + slot pools ═════════>│ Live framing + lwIP send   │
 └────────────────────────────┘                                             └────────────────────────────┘
 ```
 
-The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, sensor sampling via repeating timer callbacks, GPS UART processing, display, buttons, calibration application, WiFi connect/disconnect lifecycle, and servicing management requests (config apply, time set). Core 1 runs a dispatcher that can enter either a storage session backend or a TCP server backend. The TCP server multiplexes two framed protocols on the same port: a live preview protocol for real-time sensor streaming and a management protocol for file operations, config upload, and time synchronization. The two cores use the Pico's hardware multicore FIFO as a control mailbox and use shared RAM for live-preview batch transport and management request/response exchange.
+The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, sensor sampling via repeating timer callbacks, GPS UART processing and routing, display, buttons, calibration application, and live-session servicing while in `SERVE_TCP`. Core 1 runs a dispatcher that can enter either a storage session backend or a TCP server backend. The TCP backend starts and stops WiFi from a Core 0-provided config snapshot, then multiplexes two framed protocols on the same port: a live preview protocol for real-time sensor streaming and a management protocol for file operations, config upload, and time synchronization. The two cores use the Pico's hardware multicore FIFO as a control mailbox and use shared RAM for network-session status plus live-preview batch transport.
 
 ## Firmware module layout
 
@@ -51,7 +51,7 @@ The firmware uses both RP2040/RP2350 cores. Core 0 owns the main state machine, 
 | `data_storage.c` / `data_storage.h`             | Core 1 storage session backend (`storage_session_run`), SST file creation, chunk serialization, and file close              |
 | `live_stream_shared.c` / `live_stream_shared.h` | Shared live session state, slot pools, queue counters, and control state used by both cores                                 |
 | `live_core0_session.c` / `live_core0_session.h` | Core 0 live-preview session start or stop, negotiated timers, GPS live routing, slot filling, and drop accounting           |
-| `management_shared.c` / `management_shared.h`   | Cross-core management request/response state for config apply and time set                                                  |
+| `live_watchdog_diag.c` / `live_watchdog_diag.h` | Live-stream diagnostics and watchdog logging                                                                                |
 
 `src/net/`:
 
@@ -213,7 +213,7 @@ Recording buffers:
 
 Live preview defaults and capacities:
 
-- **Publish cadence**: 20 ms
+- **Publish cadence**: 32 ms
 - **Travel max rate**: 1000 Hz, 32 records per slot
 - **IMU max rate**: 1000 Hz, 96 IMU records per slot
 - **GPS max fix rate**: 10 Hz, 16 records per slot
@@ -299,11 +299,12 @@ The `imu_sensor.c` layer adds:
 
 Interface: `struct gps_sensor` with `init`, `configure`, `process`, `send_command`, `hot_start`, `cold_start`, `power_on`, `power_off`.
 
-| Implementation | File      | Comm                             |
-| -------------- | --------- | -------------------------------- |
-| Quectel LC76G  | `lc76g.c` | UART with IRQ-driven ring buffer |
+| Implementation      | File      | Comm                             |
+| ------------------- | --------- | -------------------------------- |
+| Quectel LC76G       | `lc76g.c` | UART with IRQ-driven ring buffer |
+| u-blox M8N / BN-880 | `m8n.c`   | UART with IRQ-driven ring buffer |
 
-Uses a **forked lwgps** library configured to parse Quectel proprietary PQTM messages (PVT + EPE) instead of standard NMEA. Standard NMEA output is disabled during configuration to reduce UART traffic.
+The LC76G driver uses a **forked lwgps** library configured to parse Quectel proprietary PQTM messages (PVT + EPE) instead of standard NMEA. The M8N driver uses UBX NAV-PVT. Standard NMEA output is disabled during configuration to reduce UART traffic.
 
 The `gps_sensor.c` layer implements a **fix quality tracker**: requires 10 consecutive 3D fixes with >=6 satellites and EPE<=6m. Bad fixes roll back the counter by 3 (hysteresis to avoid oscillation).
 
@@ -384,16 +385,16 @@ Request frame types:
 
 Response frame types:
 
-| Frame            | ID  | Payload                                                                                          | Description                             |
-| ---------------- | --- | ------------------------------------------------------------------------------------------------ | --------------------------------------- |
-| `LIST_DIR_ENTRY` | 16  | Directory entry struct (see below)                                                               | One entry per file                      |
-| `LIST_DIR_DONE`  | 17  | `{uint32_t entry_count}`                                                                         | End of listing                          |
-| `FILE_BEGIN`     | 18  | `{uint16_t file_class, uint16_t reserved, int32_t record_id, uint64_t file_size, char name[12]}` | File download starting                  |
-| `FILE_CHUNK`     | 19  | Raw file bytes (up to 512)                                                                       | Download chunk                          |
-| `FILE_END`       | 20  | (none)                                                                                           | Download complete                       |
-| `ACTION_RESULT`  | 21  | `{int32_t result_code}`                                                                          | Success/failure for mutating operations |
-| `ERROR`          | 22  | `{int32_t error_code}`                                                                           | Protocol-level error                    |
-| `PONG`           | 23  | (none)                                                                                           | Keepalive response                      |
+| Frame            | ID  | Payload                                                                                         | Description                             |
+| ---------------- | --- | ----------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `LIST_DIR_ENTRY` | 16  | Directory entry struct (see below)                                                              | One entry per file                      |
+| `LIST_DIR_DONE`  | 17  | `{uint32_t entry_count}`                                                                        | End of listing                          |
+| `FILE_BEGIN`     | 18  | `struct management_file_begin_frame` with `file_size`, `max_chunk_payload`, and `name[12]`      | File download starting                  |
+| `FILE_CHUNK`     | 19  | Raw file bytes (up to `FILE_BEGIN.max_chunk_payload`)                                           | Download chunk                          |
+| `FILE_END`       | 20  | (none)                                                                                          | Download complete                       |
+| `ACTION_RESULT`  | 21  | `{int32_t result_code}`                                                                         | Success/failure for mutating operations |
+| `ERROR`          | 22  | `{int32_t error_code}`                                                                          | Protocol-level error                    |
+| `PONG`           | 23  | (none)                                                                                          | Keepalive response                      |
 
 Directory listing entries include file metadata:
 
@@ -416,13 +417,13 @@ File classes: `MGMT_FILE_CONFIG` (1, upload only), `MGMT_FILE_ROOT_SST` (2), `MG
 
 Result codes: `OK` (0), `INVALID_REQUEST` (-1), `NOT_FOUND` (-2), `BUSY` (-3), `IO_ERROR` (-4), `VALIDATION_ERROR` (-5), `UNSUPPORTED_TARGET` (-6), `INTERNAL_ERROR` (-7).
 
-**Config upload flow**: The client sends `PUT_FILE_BEGIN` with `MGMT_FILE_CONFIG` and the file size, then `PUT_FILE_CHUNK` frames with the raw config data, and finally `PUT_FILE_COMMIT`. The server writes chunks to a staging file (`CONFIG.TMP`), then validates the staged config into a snapshot struct. The request is forwarded to Core 0 via `management_shared` with `MGMT_CORE_CMD_APPLY_CONFIG`. Core 0 applies the config and publishes back a result code. The server returns `ACTION_RESULT` with the final status.
+**Config upload flow**: The client sends `PUT_FILE_BEGIN` with `MGMT_FILE_CONFIG` and the file size, then `PUT_FILE_CHUNK` frames with the raw config data, and finally `PUT_FILE_COMMIT`. The server writes chunks to a staging file (`CONFIG.TMP`), validates the staged config into a snapshot struct, commits it to `CONFIG`, applies the snapshot, and returns `ACTION_RESULT`.
 
-**Time update flow**: `SET_TIME_REQ` is forwarded to Core 0 via `management_shared` with `MGMT_CORE_CMD_SET_TIME`. Core 0 updates the system time and the DS3231 RTC.
+**Time update flow**: `SET_TIME_REQ` calls `set_system_time_utc()`, which updates the always-on timer and the DS3231 RTC.
 
 **Mark-uploaded flow**: `GET_FILE_REQ` is read-only — the server never renames on `FILE_END`. After the client has downloaded and validated a root SST, it issues `MARK_SST_UPLOADED_REQ` with the recording's `record_id`. The server moves `xxxxx.SST` to `uploaded/xxxxx.SST` and replies with `ACTION_RESULT`. Any non-root-SST target is impossible to express (no `file_class` field) or collapses to `NOT_FOUND`. This is the only code path that populates `uploaded/`.
 
-**Cross-core communication**: Management operations that require Core 0 action (config apply, time set) use `management_shared.h`. Core 1 publishes a request (`MGMT_CORE_STATE_REQUEST_READY`), Core 0 processes it and publishes a response (`MGMT_CORE_STATE_RESPONSE_READY`), then Core 1 acknowledges and returns to idle. Memory barriers (`__dmb()`) guard all state transitions.
+Management operations run inside the Core 1 TCP backend. Live preview remains the TCP path that needs Core 0 service because Core 0 owns sensor timers and shared slot publication.
 
 #### Live preview protocol
 
@@ -431,7 +432,7 @@ The live preview protocol uses a 16-byte frame header:
 | Offset | Size | Field            | Description                    |
 | ------ | ---- | ---------------- | ------------------------------ |
 | 0      | 4    | `magic`          | `0x4556494C` ("LIVE")          |
-| 4      | 2    | `version`        | Currently `1`                  |
+| 4      | 2    | `version`        | Currently `2`                  |
 | 6      | 2    | `frame_type`     | `live_frame_type` enum         |
 | 8      | 4    | `payload_length` | Payload bytes following header |
 | 12     | 4    | `sequence`       | Per-frame sequence counter     |
@@ -499,7 +500,7 @@ A PIO-based I2C implementation (`src/pio_i2c/`) on PIO0 SM0 is used for the DS32
 | Shock sensor (rotational)    | GP14 (SDA), GP15 (SCL)               | I2C1         |
 | MicroSD (SPI)                | GP16-19                              | SPI0         |
 | MicroSD (SDIO)               | GP17-22                              | PIO1         |
-| GPS (LC76G)                  | GP0 (TX), GP1 (RX)                   | UART0        |
+| GPS (LC76G or M8N)           | GP0 (TX), GP1 (RX)                   | UART0        |
 | IMU (I2C, various positions) | Shares I2C0/I2C1 with travel sensors | I2C          |
 | IMU (SPI variant)            | GP10-13                              | SPI1         |
 | Battery voltage              | GP29 (ADC3)                          | ADC (VSYS/3) |
@@ -519,7 +520,7 @@ The firmware supports many hardware configurations via cmake cache variables. `g
 | `DISP_PROTO`       | `PIO_I2C`, `SPI`             | Display connection                               |
 | `FORK_LINEAR`      | `ON`/`OFF`                   | Linear (ADC) vs rotational (AS5600) fork sensor  |
 | `SHOCK_LINEAR`     | `ON`/`OFF`                   | Linear (ADC) vs rotational (AS5600) shock sensor |
-| `GPS_MODULE`       | `NONE`, `LC76G`              | GPS module selection                             |
+| `GPS_MODULE`       | `NONE`, `LC76G`, `M8N`       | GPS module selection                             |
 | `IMU_FRAME`        | `NONE`, `MPU6050`, `LSM6DSO` | Frame IMU chip                                   |
 | `IMU_FORK`         | `NONE`, `MPU6050`, `LSM6DSO` | Fork IMU chip                                    |
 | `IMU_REAR`         | `NONE`, `MPU6050`, `LSM6DSO` | Rear IMU chip                                    |

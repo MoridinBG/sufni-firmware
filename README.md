@@ -142,8 +142,9 @@ In STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID
 
 ## Test utilities
 
-- `test_utils/inspect_sst_data.py`: Parses an SST file and prints chunk summary (types, counts, record counts, sample rates).
-- `test_utils/sst_to_gpx.py`: Extracts GPS chunks from an SST file and generates a GPX track file with Garmin and custom SST extensions.
+- `tools/inspect_sst_data.py`: Parses an SST file and prints chunk summary (types, counts, record counts, sample rates).
+- `tools/sst_to_gpx.py`: Extracts GPS chunks from an SST file and generates a GPX track file with Garmin and custom SST extensions.
+- `tools/render_display.py`: Renders mockups of the 128x64 OLED screens for quick UI checks.
 
 ## License
 
