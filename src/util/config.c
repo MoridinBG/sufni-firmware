@@ -20,6 +20,7 @@ struct config config = {
     .travel_sample_rate = 200,
     .imu_sample_rate = 200,
     .gps_sample_rate = 1,
+    .temperature_period_seconds = 30,
 };
 
 static void copy_config_string(char *dest, size_t dest_size, const char *src) {
@@ -43,7 +44,21 @@ static void reset_config_defaults(struct config *cfg) {
         .travel_sample_rate = 200,
         .imu_sample_rate = 200,
         .gps_sample_rate = 1,
+        .temperature_period_seconds = 30,
     };
+}
+
+static char *trim_config_token(char *token) {
+    if (token == NULL) {
+        return NULL;
+    }
+
+    while (*token == ' ' || *token == '\t') { token++; }
+
+    char *end = token + strlen(token);
+    while (end > token && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) { end--; }
+    *end = 0;
+    return token;
 }
 
 static void resolve_timezone_string(struct config *cfg, const char *tz) {
@@ -89,7 +104,7 @@ static bool parse_country_value(struct config *cfg, const char *value) {
     return true;
 }
 
-static bool parse_sample_rate_value(uint16_t *out, const char *value) {
+static bool parse_nonzero_uint16_value(uint16_t *out, const char *value) {
     char *end = NULL;
     unsigned long parsed = strtoul(value, &end, 10);
     if (end == value || parsed == 0 || parsed > UINT16_MAX) {
@@ -134,7 +149,8 @@ bool config_load_file(const char *path, struct config *out) {
             continue;
         }
 
-        value[strcspn(value, "\r\n")] = 0;
+        key = trim_config_token(key);
+        value = trim_config_token(value);
 
         if (strcmp(key, "WIFI_MODE") == 0) {
             parse_ok = parse_wifi_mode_value(&parsed, value) && parse_ok;
@@ -153,11 +169,13 @@ bool config_load_file(const char *path, struct config *out) {
         } else if (strcmp(key, "TIMEZONE") == 0) {
             resolve_timezone_string(&parsed, value);
         } else if (strcmp(key, "TRAVEL_SAMPLE_RATE") == 0) {
-            parse_ok = parse_sample_rate_value(&parsed.travel_sample_rate, value) && parse_ok;
+            parse_ok = parse_nonzero_uint16_value(&parsed.travel_sample_rate, value) && parse_ok;
         } else if (strcmp(key, "IMU_SAMPLE_RATE") == 0) {
-            parse_ok = parse_sample_rate_value(&parsed.imu_sample_rate, value) && parse_ok;
+            parse_ok = parse_nonzero_uint16_value(&parsed.imu_sample_rate, value) && parse_ok;
         } else if (strcmp(key, "GPS_SAMPLE_RATE") == 0) {
-            parse_ok = parse_sample_rate_value(&parsed.gps_sample_rate, value) && parse_ok;
+            parse_ok = parse_nonzero_uint16_value(&parsed.gps_sample_rate, value) && parse_ok;
+        } else if (strcmp(key, "TEMPERATURE_PERIOD") == 0) {
+            parse_ok = parse_nonzero_uint16_value(&parsed.temperature_period_seconds, value) && parse_ok;
         }
     }
 

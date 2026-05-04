@@ -211,7 +211,7 @@ Recording buffers:
 - **Travel**: configurable via `TRAVEL_SAMPLE_RATE` (default 200 Hz), buffer 2048 records (4 bytes each = 8 KB)
 - **IMU**: configurable via `IMU_SAMPLE_RATE` (default 200 Hz), buffer scales with IMU count: `(IMU_COUNT + 1) * 512` records (12 bytes each)
 - **GPS**: fix output rate configurable via `GPS_SAMPLE_RATE` (default 1 Hz), poll interval 200ms, buffer 30 records (46 bytes each). GPS data flows through a callback (`on_gps_fix`) rather than a dedicated timer-fill pattern; the callback writes directly to the GPS buffer during `RECORD` state.
-- **Temperature**: recorded from each available temperature-capable IMU at recording start and then approximately every 30 seconds. Each record is 13 bytes and carries its own UTC timestamp.
+- **Temperature**: recorded from each available temperature-capable IMU at recording start and then every `TEMPERATURE_PERIOD` seconds (default 30). Each record is 13 bytes and carries its own UTC timestamp.
 
 Live preview defaults and capacities:
 
@@ -577,7 +577,8 @@ The `CONFIG` file is a plain-text `key=value` file (one entry per line, `=` deli
 | `TRAVEL_SAMPLE_RATE` | `200`            | uint16    | Travel sensor sampling rate in Hz (must be > 0)                               |
 | `IMU_SAMPLE_RATE`    | `200`            | uint16    | IMU sampling rate in Hz (must be > 0)                                         |
 | `GPS_SAMPLE_RATE`    | `1`              | uint16    | GPS fix output rate in Hz (must be > 0)                                       |
+| `TEMPERATURE_PERIOD` | `30`             | uint16    | Temperature recording period in seconds (must be > 0) |
 
-Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. Sample rate keys must parse as non-zero uint16 values. If parsing or validation fails, the file is rejected and defaults are used.
+Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. Sample rate and period keys must parse as non-zero uint16 values. If parsing or validation fails, the file is rejected and defaults are used.
 
 The `TIMEZONE` value is first checked against the `zones.csv` lookup table (format: `Name,"POSIX TZ string"` per line). If a match is found, the resolved POSIX string is used; otherwise the raw value is passed directly to `setenv("TZ", ...)`. This allows either a human-readable timezone name (e.g. `Europe/Budapest`) or a raw POSIX TZ string (e.g. `CET-1CEST,M3.5.0,M10.5.0/3`).

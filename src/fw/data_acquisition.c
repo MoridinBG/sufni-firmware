@@ -42,7 +42,7 @@ static repeating_timer_t gps_timer;
 #endif
 
 #if HAS_IMU
-static const int64_t TEMPERATURE_SAMPLE_INTERVAL_US = -30000000LL;
+#define MICROSECONDS_PER_SECOND 1000000LL
 
 static struct imu_record imu_databuffer1[IMU_BUFFER_SIZE];
 struct imu_record imu_databuffer2[IMU_BUFFER_SIZE];
@@ -444,7 +444,8 @@ void recording_start(ssd1306_t *disp) {
         recording_error(disp, "IMU TMR ERR");
     }
     if (temperature_active &&
-        !add_repeating_timer_us(TEMPERATURE_SAMPLE_INTERVAL_US, temperature_timer_cb, NULL, &temperature_timer)) {
+        !add_repeating_timer_us(-((int64_t)config.temperature_period_seconds * MICROSECONDS_PER_SECOND),
+                                temperature_timer_cb, NULL, &temperature_timer)) {
         recording_error(disp, "TEMP TMR ERR");
     }
     temperature_timer_running = temperature_active;
