@@ -21,6 +21,7 @@ struct config {
     uint16_t travel_sample_rate;
     uint16_t imu_sample_rate;
     uint16_t gps_sample_rate;
+    uint16_t temperature_period_seconds;
 };
 
 extern struct config config;

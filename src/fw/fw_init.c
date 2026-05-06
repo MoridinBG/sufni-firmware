@@ -142,8 +142,9 @@ static void init_config(ssd1306_t *disp) {
     if (!load_config()) {
         halt_with_message(disp, "CONF ERR");
     }
-    LOG("INIT", "Config loaded: travel=%uHz imu=%uHz gps=%uHz\n", (unsigned)config.travel_sample_rate,
-        (unsigned)config.imu_sample_rate, (unsigned)config.gps_sample_rate);
+    LOG("INIT", "Config loaded: travel=%uHz imu=%uHz gps=%uHz temp=%us\n", (unsigned)config.travel_sample_rate,
+        (unsigned)config.imu_sample_rate, (unsigned)config.gps_sample_rate,
+        (unsigned)config.temperature_period_seconds);
 }
 
 static void init_runtime(void) {

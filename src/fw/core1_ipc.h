@@ -117,6 +117,7 @@ enum storage_session_command {
     STORAGE_CMD_DUMP_IMU = 4,
     STORAGE_CMD_FINISH = 5,
     STORAGE_CMD_MARKER = 6,
+    STORAGE_CMD_DUMP_TEMPERATURE = 7,
 };
 
 enum storage_session_event {

@@ -137,6 +137,7 @@ In general, only a single client can connect to the device.
 | `TRAVEL_SAMPLE_RATE` | `200`            | Travel sensor sampling rate in Hz                                           |
 | `IMU_SAMPLE_RATE`    | `200`            | IMU sampling rate in Hz                                                     |
 | `GPS_SAMPLE_RATE`    | `1`              | GPS fix output rate in Hz                                                   |
+| `TEMPERATURE_PERIOD` | `30`             | Temperature recording period in seconds                                     |
 
 In STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` at least 8 characters. If validation fails the `CONFIG` file is rejected and built-in defaults are used. See [ARCHITECTURE.md](ARCHITECTURE.md) for field sizes and additional rules.
 

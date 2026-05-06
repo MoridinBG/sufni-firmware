@@ -7,6 +7,7 @@
 #include "fw_state.h"
 #include "sensor_setup.h"
 
+#include "../ntp/ntp.h"
 #include "../sensor/travel/travel_sensor.h"
 #include "../util/config.h"
 #include "../util/log.h"
@@ -41,11 +42,16 @@ static repeating_timer_t gps_timer;
 #endif
 
 #if HAS_IMU
+#define MICROSECONDS_PER_SECOND 1000000LL
+
 static struct imu_record imu_databuffer1[IMU_BUFFER_SIZE];
 struct imu_record imu_databuffer2[IMU_BUFFER_SIZE];
 static struct imu_record *active_imu_buffer = imu_databuffer1;
 static uint16_t imu_count = 0;
 static repeating_timer_t imu_timer;
+static struct temperature_record temperature_databuffer[TEMPERATURE_LOCATION_COUNT];
+static repeating_timer_t temperature_timer;
+static volatile bool temperature_timer_running = false;
 #endif
 
 static void recording_error(ssd1306_t *disp, const char *message) {
@@ -203,6 +209,81 @@ static bool dump_active_imu_buffer(uint16_t size) {
     return true;
 }
 
+static bool imu_temperature_supported(const struct imu_sensor *imu) {
+    return imu->temperature_celsius != NULL || (imu->read_temperature != NULL && imu->temp_scale > 0.0f);
+}
+
+static bool imu_has_temperature(const struct imu_sensor *imu) {
+    return imu->available && imu_temperature_supported(imu);
+}
+
+static uint16_t append_temperature_record(struct temperature_record *records, uint16_t count, uint8_t location_id,
+                                          struct imu_sensor *imu, int64_t timestamp_utc) {
+    if (!imu_has_temperature(imu)) {
+        return count;
+    }
+
+    records[count].timestamp_utc = timestamp_utc;
+    records[count].location_id = location_id;
+    records[count].temperature_celsius = imu_sensor_get_temperature_celsius(imu);
+    return count + 1;
+}
+
+static uint16_t collect_temperature_records(void) {
+    uint16_t count = 0;
+    int64_t timestamp_utc = (int64_t)rtc_timestamp();
+
+    count =
+        append_temperature_record(temperature_databuffer, count, TEMPERATURE_LOCATION_FRAME, &imu_frame, timestamp_utc);
+    count =
+        append_temperature_record(temperature_databuffer, count, TEMPERATURE_LOCATION_FORK, &imu_fork, timestamp_utc);
+    count =
+        append_temperature_record(temperature_databuffer, count, TEMPERATURE_LOCATION_REAR, &imu_rear, timestamp_utc);
+
+    return count;
+}
+
+static bool recording_has_temperature_source(void) {
+    return imu_has_temperature(&imu_frame) || imu_has_temperature(&imu_fork) || imu_has_temperature(&imu_rear);
+}
+
+static bool dump_temperature_records(uint16_t size) {
+    if (recording_backend_failed) {
+        return false;
+    }
+    if (size == 0) {
+        return true;
+    }
+
+    storage_push_command(STORAGE_CMD_DUMP_TEMPERATURE);
+    multicore_fifo_push_blocking(size);
+    multicore_fifo_push_blocking((uintptr_t)temperature_databuffer);
+    if (!storage_expect_event(STORAGE_EVENT_BUFFER_RETURNED)) {
+        return false;
+    }
+    // Temperature uses a single scratch buffer, so there is no alternate buffer to swap in.
+    (void)multicore_fifo_pop_blocking();
+    return true;
+}
+
+static bool recording_capture_temperature(void) { return dump_temperature_records(collect_temperature_records()); }
+
+static bool temperature_timer_cb(repeating_timer_t *rt) {
+    (void)rt;
+
+    if (state != RECORD) {
+        temperature_timer_running = false;
+        return false;
+    }
+
+    if (!recording_capture_temperature()) {
+        temperature_timer_running = false;
+        return false;
+    }
+
+    return true;
+}
+
 static bool imu_cb(repeating_timer_t *rt) {
     uint8_t active_count = 0;
     if (imu_frame.available)
@@ -299,6 +380,7 @@ void recording_reset_buffers(void) {
 #if HAS_IMU
     active_imu_buffer = imu_databuffer1;
     imu_count = 0;
+    temperature_timer_running = false;
 #endif
 }
 
@@ -344,6 +426,14 @@ void recording_start(ssd1306_t *disp) {
 #endif
     LOG("REC", "Recording to file index %d\n", index);
 
+#if HAS_IMU
+    bool temperature_active = recording_has_temperature_source();
+    if (temperature_active && !recording_capture_temperature()) {
+        recording_disp = NULL;
+        return;
+    }
+#endif
+
     if (!add_repeating_timer_us(-1000000 / config.travel_sample_rate, travel_cb, NULL, &travel_timer)) {
         recording_error(disp, "TEL TMR ERR");
     }
@@ -353,6 +443,12 @@ void recording_start(ssd1306_t *disp) {
     if (imu_active && !add_repeating_timer_us(-1000000 / config.imu_sample_rate, imu_cb, NULL, &imu_timer)) {
         recording_error(disp, "IMU TMR ERR");
     }
+    if (temperature_active &&
+        !add_repeating_timer_us(-((int64_t)config.temperature_period_seconds * MICROSECONDS_PER_SECOND),
+                                temperature_timer_cb, NULL, &temperature_timer)) {
+        recording_error(disp, "TEMP TMR ERR");
+    }
+    temperature_timer_running = temperature_active;
 #endif
 
 #if HAS_GPS
@@ -365,6 +461,13 @@ void recording_start(ssd1306_t *disp) {
 
 void recording_stop(void) {
     int32_t backend_status = 0;
+
+#if HAS_IMU
+    if (temperature_timer_running) {
+        cancel_repeating_timer(&temperature_timer);
+        temperature_timer_running = false;
+    }
+#endif
 
     cancel_repeating_timer(&travel_timer);
     if (!recording_backend_failed && travel_count > 0 && !dump_active_travel_buffer(travel_count)) {

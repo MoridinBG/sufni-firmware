@@ -202,6 +202,7 @@ int storage_session_run(void) {
 #endif
 #if HAS_IMU
     struct imu_record *imu_buffer;
+    struct temperature_record *temperature_buffer;
 #endif
 
     while (true) {
@@ -252,6 +253,16 @@ int storage_session_run(void) {
                 fr = write_chunk(CHUNK_TYPE_IMU, imu_buffer, (uint16_t)(size * sizeof(*imu_buffer)));
                 if (fr != FR_OK)
                     return fail_session("Write IMU chunk", fr);
+                break;
+            case STORAGE_CMD_DUMP_TEMPERATURE:
+                size = (uint16_t)multicore_fifo_pop_blocking();
+                temperature_buffer = (struct temperature_record *)((uintptr_t)multicore_fifo_pop_blocking());
+                storage_send_event(STORAGE_EVENT_BUFFER_RETURNED);
+                multicore_fifo_push_blocking((uintptr_t)temperature_buffer);
+                fr = write_chunk(CHUNK_TYPE_TEMPERATURE, temperature_buffer,
+                                 (uint16_t)(size * sizeof(*temperature_buffer)));
+                if (fr != FR_OK)
+                    return fail_session("Write temperature chunk", fr);
                 break;
 #endif
             case STORAGE_CMD_MARKER:

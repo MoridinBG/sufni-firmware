@@ -170,6 +170,7 @@ Storage-session FIFO protocol:
 | `STORAGE_CMD_DUMP_TRAVEL` | `size`, `buffer_ptr`             | Write a travel chunk. Core 1 returns `STORAGE_EVENT_BUFFER_RETURNED` and the buffer pointer immediately so Core 0 can keep sampling.                     |
 | `STORAGE_CMD_DUMP_IMU`    | `size`, `buffer_ptr`             | Write an IMU chunk. Same acknowledge-and-continue pattern.                                                                                               |
 | `STORAGE_CMD_DUMP_GPS`    | `size`, `buffer_ptr`             | Write a GPS chunk. Same acknowledge-and-continue pattern.                                                                                                |
+| `STORAGE_CMD_DUMP_TEMPERATURE` | `size`, `buffer_ptr`       | Write a temperature chunk containing timestamped IMU temperature samples.                                                                                |
 | `STORAGE_CMD_MARKER`      | (none)                           | Write a zero-length marker chunk to the file after Core 0 has flushed any in-flight travel/IMU data.                                                     |
 | `STORAGE_CMD_FINISH`      | (none)                           | Close the current SST file. Remaining travel/IMU/GPS data must already have been flushed by Core 0. The storage backend then returns to dispatcher idle. |
 
@@ -210,6 +211,7 @@ Recording buffers:
 - **Travel**: configurable via `TRAVEL_SAMPLE_RATE` (default 200 Hz), buffer 2048 records (4 bytes each = 8 KB)
 - **IMU**: configurable via `IMU_SAMPLE_RATE` (default 200 Hz), buffer scales with IMU count: `(IMU_COUNT + 1) * 512` records (12 bytes each)
 - **GPS**: fix output rate configurable via `GPS_SAMPLE_RATE` (default 1 Hz), poll interval 200ms, buffer 30 records (46 bytes each). GPS data flows through a callback (`on_gps_fix`) rather than a dedicated timer-fill pattern; the callback writes directly to the GPS buffer during `RECORD` state.
+- **Temperature**: recorded from each available temperature-capable IMU at recording start and then every `TEMPERATURE_PERIOD` seconds (default 30). Each record is 13 bytes and carries its own UTC timestamp.
 
 Live preview defaults and capacities:
 
@@ -250,6 +252,7 @@ The SST format is a Type-Length-Value encoded binary format. **This firmware is 
 | `IMU`      | `0x03` | 12 bytes                         | 6-axis IMU data. Array of `{int16_t ax, ay, az, gx, gy, gz}`. Records interleave all active IMUs in meta order (frame, fork, rear).                                                                              |
 | `IMU_META` | `0x04` | 9 bytes per entry + 1 byte count | IMU metadata. Precedes all IMU data chunks. First byte is active IMU count, followed by that many `{uint8_t location_id, float accel_lsb_per_g, float gyro_lsb_per_dps}`. Location IDs: 0=Frame, 1=Fork, 2=Rear. |
 | `GPS`      | `0x05` | 46 bytes                         | GPS fix data. `{uint32_t date, uint32_t time_ms, double lat, double lon, float alt, float speed, float heading, uint8_t fix_mode, uint8_t satellites, float epe_2d, float epe_3d}`                               |
+| `TEMPERATURE` | `0x06` | 13 bytes                      | IMU temperature data. Array of `{int64_t timestamp_utc, uint8_t location_id, float temperature_celsius}`. Location IDs: 0=Frame, 1=Fork, 2=Rear.                                                                |
 
 ### File layout convention
 
@@ -260,6 +263,7 @@ The SST format is a Type-Length-Value encoded binary format. **This firmware is 
 [TRAVEL chunks...]      ← bulk of the file
 [IMU chunks...]         ← interleaved with travel chunks
 [GPS chunks...]         ← appended when GPS buffer fills or on fix callback
+[TEMPERATURE chunks...] ← emitted at recording start and then about every 30 seconds
 [MARKER chunks...]      ← inserted at user request, appear between data chunks
 ```
 
@@ -573,7 +577,8 @@ The `CONFIG` file is a plain-text `key=value` file (one entry per line, `=` deli
 | `TRAVEL_SAMPLE_RATE` | `200`            | uint16    | Travel sensor sampling rate in Hz (must be > 0)                               |
 | `IMU_SAMPLE_RATE`    | `200`            | uint16    | IMU sampling rate in Hz (must be > 0)                                         |
 | `GPS_SAMPLE_RATE`    | `1`              | uint16    | GPS fix output rate in Hz (must be > 0)                                       |
+| `TEMPERATURE_PERIOD` | `30`             | uint16    | Temperature recording period in seconds (must be > 0) |
 
-Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. Sample rate keys must parse as non-zero uint16 values. If parsing or validation fails, the file is rejected and defaults are used.
+Validation rules: in STA mode both `STA_SSID` and `STA_PSK` must be non-empty; in AP mode `AP_SSID` must be non-empty and `AP_PSK` must be at least 8 characters. Sample rate and period keys must parse as non-zero uint16 values. If parsing or validation fails, the file is rejected and defaults are used.
 
 The `TIMEZONE` value is first checked against the `zones.csv` lookup table (format: `Name,"POSIX TZ string"` per line). If a match is found, the resolved POSIX string is used; otherwise the raw value is passed directly to `setenv("TZ", ...)`. This allows either a human-readable timezone name (e.g. `Europe/Budapest`) or a raw POSIX TZ string (e.g. `CET-1CEST,M3.5.0,M10.5.0/3`).

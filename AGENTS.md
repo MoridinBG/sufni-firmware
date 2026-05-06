@@ -86,8 +86,8 @@ The device reads a `CONFIG` file from the SD card at boot. It is `key=value`, on
 `src/util/config.c`.
 
 Supported keys include `WIFI_MODE`, `STA_SSID`, `STA_PSK`, `AP_SSID`, `AP_PSK`, `NTP_SERVER`, `COUNTRY`, `TIMEZONE`,
-`TRAVEL_SAMPLE_RATE`, `IMU_SAMPLE_RATE`, and `GPS_SAMPLE_RATE`. Legacy aliases `SSID` and `PSK` map to station
-credentials.
+`TRAVEL_SAMPLE_RATE`, `IMU_SAMPLE_RATE`, `GPS_SAMPLE_RATE`, and `TEMPERATURE_PERIOD`. Legacy aliases `SSID` and `PSK`
+map to station credentials.
 
 `TIMEZONE` accepts either a POSIX TZ string or a name resolved through `zones.csv` on the SD card.
 

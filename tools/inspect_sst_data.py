@@ -11,6 +11,7 @@ CHUNK_TYPES = {
     0x03: "IMU",
     0x04: "IMU_META",
     0x05: "GPS",
+    0x06: "TEMPERATURE",
 }
 
 # Record sizes in bytes (from sst.h)
@@ -21,6 +22,7 @@ RECORD_SIZES = {
     0x03: 12,  # imu_record: 6 * int16_t
     0x04: 9,   # imu_meta_record: uint8_t + float + float (packed)
     0x05: 46,  # gps_record: see sst.h for full layout
+    0x06: 13,  # temperature_record: int64_t timestamp + uint8_t location + float celsius
 }
 
 
