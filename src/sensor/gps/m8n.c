@@ -640,6 +640,7 @@ void m8n_init(struct gps_sensor *gps) {
     m8n_reset_parser();
     m8n_rx_enable(gps);
 
+    m8n_process_for_ms(gps, 500);
     gps->available = m8n_probe_link(gps);
     if (gps->available) {
         return;
