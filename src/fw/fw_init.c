@@ -14,6 +14,7 @@
 #include "sensor_setup.h"
 
 #include "../ntp/ntp.h"
+#include "pico/aon_timer.h"
 #include "../pio_i2c/pio_i2c.h"
 #include "../sensor/travel/travel_sensor.h"
 #include "../ui/pushbutton.h"
